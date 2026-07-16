@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <!-- Opportunity Ring Gradient: Tailwind Indigo to Purple -->
+    <linearGradient id="ringGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#6366F1" />
+      <stop offset="100%" stop-color="#A855F7" />
+    </linearGradient>
+    
+    <!-- Left Wing Gradient: Tailwind Sky Blue -->
+    <linearGradient id="leftWing" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38BDF8" />
+      <stop offset="100%" stop-color="#0284C7" />
+    </linearGradient>
+
+    <!-- Right Wing Gradient: Tailwind Deep Sky Blue -->
+    <linearGradient id="rightWing" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0284C7" />
+      <stop offset="100%" stop-color="#0369A1" />
+    </linearGradient>
+  </defs>
+  
+  <!-- The 'O' / Radar Loop -->
+  <path 
+    d="M 314 190 A 144 144 0 1 0 356 292" 
+    stroke="url(#ringGrad)" 
+    stroke-width="64" 
+    stroke-linecap="round" 
+  />
+  
+  <!-- The Pilot / Automated Outreach Plane -->
+  <!-- Left Wing -->
+  <polygon points="476,44 284,156 316,220" fill="url(#leftWing)" />
+  <!-- Right Wing -->
+  <polygon points="476,44 316,220 380,284" fill="url(#rightWing)" />
+</svg>
