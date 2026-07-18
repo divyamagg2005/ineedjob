@@ -4,7 +4,7 @@ import React from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Database, Search } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
-import { getHunterStatus, getSupabaseStatus } from '@/app/actions/status';
+import { getHunterStatus, getDatabaseStatus } from '@/app/actions/status';
 
 export function PipelineStatus() {
   const { data: hunterStatus, isLoading: isHunterLoading } = useQuery({
@@ -13,9 +13,9 @@ export function PipelineStatus() {
     refetchInterval: 60000, // Refetch every minute
   });
 
-  const { data: supabaseStatus, isLoading: isSupabaseLoading } = useQuery({
-    queryKey: ['supabaseStatus'],
-    queryFn: () => getSupabaseStatus(),
+  const { data: databaseStatus, isLoading: isDatabaseLoading } = useQuery({
+    queryKey: ['databaseStatus'],
+    queryFn: () => getDatabaseStatus(),
     refetchInterval: 60000,
   });
 
@@ -27,10 +27,10 @@ export function PipelineStatus() {
       active: hunterStatus?.status === 'Connected' 
     },
     { 
-      name: 'Supabase', 
+      name: 'PostgreSQL RDS', 
       icon: Database, 
-      status: isSupabaseLoading ? 'Checking...' : (supabaseStatus?.status || 'Unknown'), 
-      active: supabaseStatus?.status === 'Connected' 
+      status: isDatabaseLoading ? 'Checking...' : (databaseStatus?.status || 'Unknown'), 
+      active: databaseStatus?.status === 'Connected' 
     },
   ];
 

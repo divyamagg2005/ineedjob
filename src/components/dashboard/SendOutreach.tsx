@@ -9,7 +9,7 @@ import { toast } from 'sonner';
 
 import { getStoredUser } from '@/lib/google-auth';
 import { sendEmail } from '@/app/actions/email';
-import { supabase } from '@/lib/supabase';
+import { insertApplication } from '@/app/actions/applications';
 
 interface SendOutreachProps {
   resumeFileName: string | null;
@@ -58,16 +58,16 @@ export function SendOutreach({ resumeFileName, emailSubject, emailBody }: SendOu
         return;
       }
 
-      // 2. Log it into Supabase `applications` table
-      const { error: dbError } = await supabase.from('applications').insert({
+      // 2. Log it into PostgreSQL `applications` table
+      const dbResult = await insertApplication({
         user_email: user.email,
         company_name: companyName,
         recipient_email: recipientEmail,
         resume_file: resumeFileName || null
       });
 
-      if (dbError) {
-        console.error('Database error:', dbError);
+      if (!dbResult.success) {
+        console.error('Database error:', dbResult.error);
         toast.warning('Email was sent, but failed to log to database.');
       } else {
         toast.success(`Successfully dispatched email to ${companyName}!`);

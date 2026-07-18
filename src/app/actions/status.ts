@@ -1,6 +1,6 @@
 'use server'
 
-import { supabase } from '@/lib/supabase';
+import { testConnection } from '@/lib/db';
 
 export async function getHunterStatus() {
   const apiKey = process.env.HUNTER_API_KEY;
@@ -30,13 +30,12 @@ export async function getHunterStatus() {
   }
 }
 
-export async function getSupabaseStatus() {
+export async function getDatabaseStatus() {
   try {
-    // A lightweight ping to verify Supabase connectivity
-    // Using a simple auth check (or you can query a public table if you prefer)
-    const { error } = await supabase.auth.getSession();
+    // Test PostgreSQL connectivity with a simple query
+    const isConnected = await testConnection();
     
-    if (error) {
+    if (!isConnected) {
       return { status: 'Error' };
     }
 

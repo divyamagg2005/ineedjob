@@ -6,7 +6,6 @@ import { Button } from '@/components/ui/button';
 import { UploadCloud, FileText, Trash2, CheckCircle2 } from 'lucide-react';
 import { toast } from 'sonner';
 
-import { supabase } from '@/lib/supabase';
 import { getStoredUser } from '@/lib/google-auth';
 
 export function ResumeManager({ onResumeUpdate }: { onResumeUpdate?: (fileName: string | null) => void }) {
@@ -30,20 +29,11 @@ export function ResumeManager({ onResumeUpdate }: { onResumeUpdate?: (fileName: 
         return;
       }
 
-      const fileExt = file.name.split('.').pop();
-      const safeEmail = user.email.replace(/[^a-zA-Z0-9]/g, '_');
-      const fileName = `${safeEmail}-${Date.now()}.${fileExt}`;
-
-      const { error: uploadError } = await supabase.storage
-        .from('ineedjob')
-        .upload(fileName, file);
-
-      if (uploadError) {
-        throw uploadError;
-      }
-
+      // Store resume filename locally (file is kept in browser memory)
+      // In a production scenario, you would upload this to S3 or another storage service
+      // For now, we'll just track the filename
       setResume(file.name);
-      toast.success('Resume uploaded to Supabase Storage');
+      toast.success('Resume ready for use');
     } catch (error: unknown) {
       const err = error as Error;
       toast.error('Upload failed: ' + err.message);
@@ -92,7 +82,7 @@ export function ResumeManager({ onResumeUpdate }: { onResumeUpdate?: (fileName: 
                 <div>
                   <p className="font-medium text-sm">{resume}</p>
                   <div className="flex items-center gap-1 mt-1 text-xs text-green-600 dark:text-green-500">
-                    <CheckCircle2 className="h-3 w-3" /> Uploaded successfully
+                    <CheckCircle2 className="h-3 w-3" /> Ready for use
                   </div>
                 </div>
               </div>
