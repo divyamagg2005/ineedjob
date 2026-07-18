@@ -1,6 +1,6 @@
 import { Pool, PoolClient } from 'pg';
 
-// Create a connection pool to AWS RDS PostgreSQL
+// Create a connection pool to AWS RDS PostgreSQL with robust settings
 const pool = new Pool({
   host: process.env.DB_HOST,
   port: parseInt(process.env.DB_PORT || '5432'),
@@ -8,14 +8,23 @@ const pool = new Pool({
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+  
+  // Connection pool settings
   max: 20, // Maximum number of clients in the pool
-  min: 2, // Minimum number of clients
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 10000, // Increased to 10 seconds
-  query_timeout: 30000, // Query timeout: 30 seconds
-  statement_timeout: 30000, // Statement timeout: 30 seconds
+  min: 2, // Minimum number of clients to keep alive
+  idleTimeoutMillis: 10000, // Close idle clients after 10 seconds
+  connectionTimeoutMillis: 10000, // Wait 10 seconds for new connection
+  
+  // Query timeouts
+  query_timeout: 30000, // 30 seconds
+  statement_timeout: 30000, // 30 seconds
+  
+  // Keep-alive to prevent connection drops
   keepAlive: true,
   keepAliveInitialDelayMillis: 10000,
+  
+  // Allow the pool to automatically remove broken connections
+  allowExitOnIdle: false,
 });
 
 // Log connection configuration (without password)
@@ -28,26 +37,49 @@ console.log('Database Configuration:', {
   passwordSet: !!process.env.DB_PASSWORD,
 });
 
-// Handle pool errors
-pool.on('error', (err) => {
-  console.error('Unexpected error on idle PostgreSQL client', err);
-});
-
-// Handle pool connection events
-pool.on('connect', (client) => {
-  console.log('New client connected to the pool');
-});
-
-pool.on('acquire', (client) => {
-  console.log('Client acquired from pool');
-});
-
-pool.on('remove', (client) => {
-  console.log('Client removed from pool');
+// Handle pool errors - remove bad clients automatically
+pool.on('error', (err, client) => {
+  console.error('Unexpected pool error:', err.message);
+  // The pool will automatically remove the client and create a new one
 });
 
 // Export the pool for direct query execution
 export const db = pool;
+
+// Helper function to validate and reconnect if needed
+async function getHealthyClient(): Promise<PoolClient> {
+  const maxAttempts = 3;
+  
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const client = await pool.connect();
+      
+      // Test if the connection is actually alive
+      try {
+        await client.query('SELECT 1');
+        return client; // Connection is healthy
+      } catch (testError) {
+        // Connection is broken, release it and try again
+        console.error(`Connection test failed (attempt ${attempt}/${maxAttempts}):`, testError);
+        client.release(true); // Force remove this broken connection
+        
+        if (attempt < maxAttempts) {
+          await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+          continue;
+        }
+        throw testError;
+      }
+    } catch (error) {
+      console.error(`Failed to get client (attempt ${attempt}/${maxAttempts}):`, error);
+      if (attempt === maxAttempts) {
+        throw error;
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+    }
+  }
+  
+  throw new Error('Failed to get healthy database connection');
+}
 
 // Helper function to execute queries with automatic connection handling
 export async function query<T = any>(
