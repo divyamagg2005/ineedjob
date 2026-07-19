@@ -42,7 +42,7 @@ export async function getHunterStatus() {
   }
 
   try {
-    const res = await fetch('https://api.hunter.io/v2/account', {
+    const res = await fetch(`https://api.hunter.io/v2/account?api_key=${apiKey}`, {
       method: 'GET',
       headers: {
         Accept: 'application/json',
@@ -57,13 +57,14 @@ export async function getHunterStatus() {
     }
 
     const data = await res.json();
+    const creditsUsage = data?.data?.requests?.credits;
     const searchUsage = data?.data?.requests?.searches;
-    const used = typeof searchUsage?.used === 'number' ? searchUsage.used : 0;
-    const remaining = typeof searchUsage?.available === 'number' ? searchUsage.available : null;
-    const limit = typeof searchUsage?.limit === 'number' ? searchUsage.limit : null;
+    const used = typeof creditsUsage?.used === 'number' ? creditsUsage.used : (typeof searchUsage?.used === 'number' ? searchUsage.used : 0);
+    const remaining = typeof creditsUsage?.remaining === 'number' ? creditsUsage.remaining : null;
+    const limit = typeof creditsUsage?.available === 'number' ? Math.round(creditsUsage.available + (creditsUsage.used ?? 0)) : null;
     const value = {
       status: 'Connected',
-      credits: remaining !== null ? `${remaining} remaining` : null,
+      credits: remaining !== null && creditsUsage?.available !== undefined ? `${used} / ${Math.round(creditsUsage.available)}` : remaining !== null ? `${remaining}` : null,
       used,
       remaining,
       limit,

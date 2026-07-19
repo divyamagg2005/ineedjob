@@ -67,7 +67,7 @@ export function StatsCards() {
       <StatCard
         title="Hunter Credits"
         value={isHunterLoading ? 'Checking…' : hunterStatus?.credits ?? 'Unavailable'}
-        hint="Live remaining usage from the Hunter API"
+        hint="Credits used out of your Hunter API monthly limit"
         icon={Activity}
         accent="bg-violet-500/10 text-violet-300 border-violet-500/20"
         isLoading={isHunterLoading}
