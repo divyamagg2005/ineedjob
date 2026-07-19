@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { fetchCompanies, blacklistCompany, type Company } from '@/app/actions/companies';
+import { saveDraftForCompany, loadDraftForCompany } from '@/app/actions/campaign-drafts';
 import { uploadResumeForCompany } from '@/app/actions/resumes';
 import { getStoredUser } from '@/lib/google-auth';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
@@ -208,6 +209,160 @@ function EmptyState({ filtered }: { filtered: boolean }) {
   );
 }
 
+interface DraftComposerProps {
+  company: Company | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSaved: () => void;
+}
+
+function DraftComposer({ company, open, onOpenChange, onSaved }: DraftComposerProps) {
+  const [subject, setSubject] = useState('');
+  const [body, setBody] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [hasLoaded, setHasLoaded] = useState(false);
+
+  const currentUser = getStoredUser();
+
+  const resetDraftForm = useCallback(() => {
+    setSubject('');
+    setBody('');
+    setError(null);
+    setHasLoaded(false);
+  }, []);
+
+  React.useEffect(() => {
+    if (!open || !company) {
+      return;
+    }
+
+    const loadDraft = async () => {
+      resetDraftForm();
+      setIsLoading(true);
+      try {
+        const result = await loadDraftForCompany(company.id, currentUser?.accessToken);
+        if (result.success) {
+          setSubject(result.subject ?? '');
+          setBody(result.body ?? '');
+        } else {
+          setError(result.error ?? 'Unable to load draft.');
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Unable to load draft.');
+      } finally {
+        setIsLoading(false);
+        setHasLoaded(true);
+      }
+    };
+
+    loadDraft();
+  }, [company?.id, currentUser?.accessToken, open, resetDraftForm]);
+
+  const handleSave = async () => {
+    if (!company || isSaving || isLoading) return;
+
+    const trimmedSubject = subject.trim();
+    const trimmedBody = body.trim();
+
+    if (!trimmedSubject || !trimmedBody) {
+      setError('Please enter both a subject and email body before saving.');
+      return;
+    }
+
+    setIsSaving(true);
+    setError(null);
+    try {
+      const result = await saveDraftForCompany({ companyId: company.id, subject: trimmedSubject, body: trimmedBody }, currentUser?.accessToken);
+      if (!result.success) {
+        throw new Error(result.error ?? 'Unable to save draft.');
+      }
+
+      toast.success('Draft saved successfully.');
+      onSaved();
+      onOpenChange(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to save draft.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleDialogOpenChange = (nextOpen: boolean) => {
+    if (!nextOpen) {
+      resetDraftForm();
+    }
+    onOpenChange(nextOpen);
+  };
+
+  if (!open || !company) {
+    return null;
+  }
+
+  return (
+    <Dialog.Root open={open} onOpenChange={handleDialogOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm" />
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-full max-w-2xl -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-white/[0.08] bg-zinc-900 p-6 shadow-2xl shadow-black/50 focus:outline-none">
+          <div className="mb-5 flex items-start justify-between gap-4">
+            <div>
+              <Dialog.Title className="text-lg font-semibold text-white">Email Draft</Dialog.Title>
+              <p className="mt-1 text-sm text-zinc-500">Compose a draft for {company.company_name}.</p>
+            </div>
+            <div className="rounded-full border border-white/[0.08] bg-white/[0.04] px-2.5 py-1 text-xs font-medium text-zinc-400">
+              {hasLoaded ? 'Loaded' : 'Loading...'}
+            </div>
+          </div>
+
+          {error ? (
+            <div className="mb-4 rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-400">{error}</div>
+          ) : null}
+
+          <div className="space-y-4">
+            <div>
+              <label className="mb-2 block text-sm font-medium text-zinc-300">Company Name</label>
+              <Input value={company.company_name} readOnly className="bg-white/[0.04] border-white/[0.08] text-zinc-200" />
+            </div>
+            <div>
+              <label className="mb-2 block text-sm font-medium text-zinc-300">Subject</label>
+              <Input
+                value={subject}
+                onChange={(e) => setSubject(e.target.value)}
+                placeholder="Enter a subject"
+                className="bg-white/[0.04] border-white/[0.08] text-zinc-200"
+              />
+            </div>
+            <div>
+              <label className="mb-2 block text-sm font-medium text-zinc-300">Email Body</label>
+              <textarea
+                value={body}
+                onChange={(e) => setBody(e.target.value)}
+                placeholder="Write your outreach email"
+                rows={10}
+                className="min-h-[220px] w-full rounded-lg border border-white/[0.08] bg-white/[0.04] px-3 py-2 text-sm text-zinc-200 outline-none focus:border-violet-500/40"
+              />
+            </div>
+            <div className="rounded-lg border border-white/[0.08] bg-white/[0.04] p-3 text-sm text-zinc-400">
+              <span className="font-medium text-zinc-300">Resume:</span>{' '}
+              {company.has_resume ? 'Attached' : 'No resume attached yet'}
+            </div>
+          </div>
+
+          <div className="mt-6 flex justify-end gap-3">
+            <Button variant="outline" className="border-white/[0.08] bg-white/[0.04] text-zinc-300" onClick={() => handleDialogOpenChange(false)} disabled={isSaving || isLoading}>
+              Cancel
+            </Button>
+            <Button className="bg-violet-600 hover:bg-violet-700" onClick={handleSave} disabled={isSaving || isLoading}>
+              {isSaving ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Saving...</> : 'Save Draft'}
+            </Button>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
 export function InternshipsTable() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState('');
@@ -215,6 +370,9 @@ export function InternshipsTable() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [uploadingCompanyId, setUploadingCompanyId] = useState<number | null>(null);
   const [resumeAttachedCompanyIds, setResumeAttachedCompanyIds] = useState<Record<number, boolean>>({});
+  const [composerCompany, setComposerCompany] = useState<Company | null>(null);
+  const [composerOpen, setComposerOpen] = useState(false);
+  const [savingDraft, setSavingDraft] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [pendingCompanyId, setPendingCompanyId] = useState<number | null>(null);
 
@@ -256,6 +414,11 @@ export function InternshipsTable() {
   const handleResumeClick = useCallback((companyId: number) => {
     setPendingCompanyId(companyId);
     fileInputRef.current?.click();
+  }, []);
+
+  const handleEmailClick = useCallback((company: Company) => {
+    setComposerCompany(company);
+    setComposerOpen(true);
   }, []);
 
   const handleResumeSelection = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -407,10 +570,11 @@ export function InternshipsTable() {
                         <button
                           type="button"
                           className="inline-flex items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.04] px-2.5 py-1.5 text-xs font-medium text-zinc-300 transition-colors hover:bg-white/[0.08]"
-                          disabled
+                          onClick={() => handleEmailClick(company)}
+                          disabled={savingDraft}
                         >
                           <Mail className="h-3.5 w-3.5" />
-                          {company.email_count && company.email_count > 0 ? 'Edit Email' : 'Write Email'}
+                          {company.status?.toLowerCase() === 'draft' ? 'Edit Email' : 'Write Email'}
                         </button>
                       </td>
                       <td className="px-4 py-3.5">
@@ -464,6 +628,20 @@ export function InternshipsTable() {
         accept=".pdf,application/pdf"
         className="hidden"
         onChange={handleResumeSelection}
+      />
+      <DraftComposer
+        company={composerCompany}
+        open={composerOpen}
+        onOpenChange={(open) => {
+          setComposerOpen(open);
+          if (!open) {
+            setComposerCompany(null);
+          }
+        }}
+        onSaved={() => {
+          setSavingDraft(false);
+          queryClient.invalidateQueries({ queryKey: ['companies', currentUser?.email, currentUser?.userId] });
+        }}
       />
       <BlacklistDialog
         company={blacklistTarget}
