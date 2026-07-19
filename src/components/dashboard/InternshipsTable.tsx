@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -13,9 +13,12 @@ import {
   Building2,
   Loader2,
   AlertTriangle,
+  FileText,
+  Send,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { fetchCompanies, blacklistCompany, type Company } from '@/app/actions/companies';
+import { uploadResumeForCompany } from '@/app/actions/resumes';
 import { getStoredUser } from '@/lib/google-auth';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import * as Dialog from '@radix-ui/react-dialog';
@@ -37,17 +40,21 @@ function formatDate(iso: string | null): string {
 }
 
 function StatusBadge({ status }: { status: string | null }) {
-  const s = (status ?? '').toLowerCase();
+  const s = (status ?? '').toLowerCase().trim();
   const config: Record<string, { label: string; className: string }> = {
-    ready: { label: 'Ready', className: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/20' },
+    new: { label: 'New', className: 'bg-sky-500/15 text-sky-400 border-sky-500/20' },
+    draft: { label: 'Draft', className: 'bg-amber-500/15 text-amber-400 border-amber-500/20' },
     sent: { label: 'Sent', className: 'bg-violet-500/15 text-violet-400 border-violet-500/20' },
-    pending: { label: 'Pending', className: 'bg-amber-500/15 text-amber-400 border-amber-500/20' },
     failed: { label: 'Failed', className: 'bg-red-500/15 text-red-400 border-red-500/20' },
+    follow_up_due: { label: 'Follow-Up Due', className: 'bg-orange-500/15 text-orange-400 border-orange-500/20' },
+    followup_due: { label: 'Follow-Up Due', className: 'bg-orange-500/15 text-orange-400 border-orange-500/20' },
+    ready: { label: 'Ready', className: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/20' },
+    pending: { label: 'Pending', className: 'bg-amber-500/15 text-amber-400 border-amber-500/20' },
     waiting_reply: { label: 'Waiting Reply', className: 'bg-sky-500/15 text-sky-400 border-sky-500/20' },
     replied: { label: 'Replied', className: 'bg-teal-500/15 text-teal-400 border-teal-500/20' },
     closed: { label: 'Closed', className: 'bg-zinc-500/15 text-zinc-400 border-zinc-500/20' },
   };
-  const cfg = config[s] ?? { label: status || 'Unknown', className: 'bg-zinc-500/15 text-zinc-400 border-zinc-500/20' };
+  const cfg = config[s] ?? { label: status || 'New', className: 'bg-zinc-500/15 text-zinc-400 border-zinc-500/20' };
   return (
     <span className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${cfg.className}`}>
       {cfg.label}
@@ -184,7 +191,7 @@ function BlacklistDialog({ company, open, onOpenChange, onConfirm, isPending }: 
 function EmptyState({ filtered }: { filtered: boolean }) {
   return (
     <tr>
-      <td colSpan={5}>
+      <td colSpan={6}>
         <div className="flex flex-col items-center justify-center py-16 px-4 text-center">
           <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-white/[0.04] border border-white/[0.06]">
             <Building2 className="h-7 w-7 text-zinc-600" />
@@ -206,6 +213,10 @@ export function InternshipsTable() {
   const [search, setSearch] = useState('');
   const [blacklistTarget, setBlacklistTarget] = useState<Company | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [uploadingCompanyId, setUploadingCompanyId] = useState<number | null>(null);
+  const [resumeAttachedCompanyIds, setResumeAttachedCompanyIds] = useState<Record<number, boolean>>({});
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [pendingCompanyId, setPendingCompanyId] = useState<number | null>(null);
 
   const currentUser = getStoredUser();
 
@@ -241,6 +252,49 @@ export function InternshipsTable() {
   const filtered = companies.filter((c) =>
     c.company_name?.toLowerCase().includes(search.toLowerCase())
   );
+
+  const handleResumeClick = useCallback((companyId: number) => {
+    setPendingCompanyId(companyId);
+    fileInputRef.current?.click();
+  }, []);
+
+  const handleResumeSelection = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const selectedFile = event.target.files?.[0];
+    const companyId = pendingCompanyId;
+
+    if (!selectedFile || companyId === null) {
+      setPendingCompanyId(null);
+      return;
+    }
+
+    setUploadingCompanyId(companyId);
+    setPendingCompanyId(null);
+
+    try {
+      const formData = new FormData();
+      formData.append('file', selectedFile);
+      formData.append('companyId', String(companyId));
+
+      const result = await uploadResumeForCompany(formData, currentUser?.accessToken);
+
+      if (!result.success) {
+        throw new Error(result.error || 'Resume upload failed.');
+      }
+
+      setResumeAttachedCompanyIds((prev) => ({ ...prev, [companyId]: true }));
+      toast.success(`Resume attached for ${companies.find((item) => item.id === companyId)?.company_name || 'the selected company'}.`);
+      queryClient.invalidateQueries({ queryKey: ['companies', currentUser?.email, currentUser?.userId] });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unexpected error.';
+      toast.error(message);
+      console.error('[resume-upload]', error);
+    } finally {
+      setUploadingCompanyId(null);
+      if (event.target) {
+        event.target.value = '';
+      }
+    }
+  }, [companies, currentUser?.accessToken, currentUser?.email, currentUser?.userId, pendingCompanyId, queryClient]);
 
   React.useEffect(() => {
     if (!isLoading) {
@@ -304,10 +358,11 @@ export function InternshipsTable() {
               <thead className="sticky top-0 z-10 border-b border-white/[0.07] bg-zinc-950/80 backdrop-blur-sm">
                 <tr>
                   <th className="px-4 py-3 text-left text-xs font-medium text-zinc-500 uppercase tracking-wider whitespace-nowrap w-full">Company</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-zinc-500 uppercase tracking-wider whitespace-nowrap">Emails</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-zinc-500 uppercase tracking-wider whitespace-nowrap">Emails Found</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-zinc-500 uppercase tracking-wider whitespace-nowrap">Resume</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-zinc-500 uppercase tracking-wider whitespace-nowrap">Email</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-zinc-500 uppercase tracking-wider whitespace-nowrap">Status</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-zinc-500 uppercase tracking-wider whitespace-nowrap">Created</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-zinc-500 uppercase tracking-wider whitespace-nowrap">Actions</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-zinc-500 uppercase tracking-wider whitespace-nowrap">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/[0.04]">
@@ -323,7 +378,7 @@ export function InternshipsTable() {
                           <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-white/[0.05] border border-white/[0.07] text-xs font-semibold text-zinc-400 select-none">
                             {company.company_name?.charAt(0)?.toUpperCase() ?? '?'}
                           </div>
-                          <span className="font-medium text-zinc-100 truncate max-w-[200px]">
+                          <span className="font-medium text-zinc-100 truncate max-w-[220px]">
                             {company.company_name ?? '—'}
                           </span>
                         </div>
@@ -334,13 +389,58 @@ export function InternshipsTable() {
                         </span>
                       </td>
                       <td className="px-4 py-3.5">
+                        <button
+                          type="button"
+                          className="inline-flex items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.04] px-2.5 py-1.5 text-xs font-medium text-zinc-300 transition-colors hover:bg-white/[0.08]"
+                          onClick={() => handleResumeClick(company.id)}
+                          disabled={uploadingCompanyId === company.id}
+                        >
+                          <FileText className="h-3.5 w-3.5" />
+                          {uploadingCompanyId === company.id
+                            ? 'Uploading...'
+                            : resumeAttachedCompanyIds[company.id] || company.has_resume
+                              ? 'Resume Attached'
+                              : 'Upload Resume'}
+                        </button>
+                      </td>
+                      <td className="px-4 py-3.5">
+                        <button
+                          type="button"
+                          className="inline-flex items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.04] px-2.5 py-1.5 text-xs font-medium text-zinc-300 transition-colors hover:bg-white/[0.08]"
+                          disabled
+                        >
+                          <Mail className="h-3.5 w-3.5" />
+                          {company.email_count && company.email_count > 0 ? 'Edit Email' : 'Write Email'}
+                        </button>
+                      </td>
+                      <td className="px-4 py-3.5">
                         <StatusBadge status={company.status} />
                       </td>
-                      <td className="px-4 py-3.5 text-zinc-500 text-xs tabular-nums whitespace-nowrap">
-                        {formatDate(company.created_at)}
-                      </td>
                       <td className="px-4 py-3.5 text-right">
-                        <ActionsMenu company={company} onBlacklist={handleBlacklistRequest} />
+                        <div className="flex items-center justify-end gap-2">
+                          {(company.status ?? '').toLowerCase().includes('follow') ? (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="h-8 border-white/[0.08] bg-white/[0.04] text-zinc-400 hover:bg-white/[0.08] hover:text-zinc-200"
+                              disabled
+                            >
+                              Follow Up
+                            </Button>
+                          ) : (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="h-8 border-violet-500/20 bg-violet-500/10 text-violet-300 hover:bg-violet-500/20"
+                            >
+                              <Send className="mr-1.5 h-3.5 w-3.5" />
+                              Send
+                            </Button>
+                          )}
+                          <ActionsMenu company={company} onBlacklist={handleBlacklistRequest} />
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -358,6 +458,13 @@ export function InternshipsTable() {
           )}
         </div>
       </section>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".pdf,application/pdf"
+        className="hidden"
+        onChange={handleResumeSelection}
+      />
       <BlacklistDialog
         company={blacklistTarget}
         open={dialogOpen}
