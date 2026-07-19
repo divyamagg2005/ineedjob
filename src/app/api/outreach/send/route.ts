@@ -18,11 +18,12 @@ export async function POST(request: NextRequest) {
       const authenticatedUser = await getAuthenticatedUserContext(undefined, undefined, accessToken);
 
       const draftResult = await query<{ email_subject: string | null; email_body: string | null; resume_url: string | null }>(
-        `SELECT email_subject, email_body, resume_url
-         FROM outreach_campaigns
-         WHERE user_id = $1 AND company_id = $2 AND (status IS NULL OR LOWER(status) <> 'sent')
-         ORDER BY updated_at DESC, created_at DESC
-         LIMIT 1`,
+        `SELECT
+           -- Take subject/body from the most recent draft
+           (SELECT email_subject FROM outreach_campaigns WHERE user_id = $1 AND company_id = $2 ORDER BY updated_at DESC, created_at DESC LIMIT 1) AS email_subject,
+           (SELECT email_body FROM outreach_campaigns WHERE user_id = $1 AND company_id = $2 ORDER BY updated_at DESC, created_at DESC LIMIT 1) AS email_body,
+           -- Take resume_url from whichever campaign has one set (most recently updated)
+           (SELECT resume_url FROM outreach_campaigns WHERE user_id = $1 AND company_id = $2 AND resume_url IS NOT NULL ORDER BY updated_at DESC, created_at DESC LIMIT 1) AS resume_url`,
         [authenticatedUser.id, companyId]
       );
 
@@ -30,6 +31,9 @@ export async function POST(request: NextRequest) {
       if (!draft?.email_subject || !draft?.email_body) {
         return NextResponse.json({ error: 'No saved draft found for this company. Please save a draft first.' }, { status: 400 });
       }
+
+      // Log so we can debug resume attachment issues
+      console.log(`[send] companyId=${companyId} resume_url=${draft.resume_url ?? 'none'}`);
 
       const result = await sendInitialCampaignEmailToRecipient({
         accessToken,

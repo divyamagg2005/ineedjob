@@ -321,8 +321,8 @@ interface DraftComposerProps {
 
 type ComposerStep = 'compose' | 'pick-recipient';
 
-// Delay between individual sends when multiple recipients selected (ms)
-const MULTI_SEND_DELAY_MS = 8000; // 8 seconds — looks human, avoids spam flags
+// Random delay between individual sends: 15–50 seconds
+const getRandomSendDelay = () => Math.floor(Math.random() * (50000 - 15000 + 1)) + 15000;
 
 interface SendProgress {
   email: string;
@@ -521,7 +521,8 @@ function DraftComposer({ company, open, onOpenChange, onSaved, onSent }: DraftCo
 
       // Delay between sends (skip after last one)
       if (isBatch && i < toSend.length - 1) {
-        await new Promise((resolve) => setTimeout(resolve, MULTI_SEND_DELAY_MS));
+        const delay = getRandomSendDelay();
+        await new Promise((resolve) => setTimeout(resolve, delay));
       }
     }
 
@@ -643,7 +644,7 @@ function DraftComposer({ company, open, onOpenChange, onSaved, onSent }: DraftCo
                       </p>
                       {isSending && selectedEmails.size > 1 && (
                         <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
-                          Sending with {MULTI_SEND_DELAY_MS / 1000}s delay between emails to avoid spam detection.
+                          Sending with a random 15–50s delay between emails to avoid spam detection.
                         </div>
                       )}
                       <div className="max-h-[280px] overflow-y-auto space-y-2 pr-1">
@@ -663,7 +664,7 @@ function DraftComposer({ company, open, onOpenChange, onSaved, onSent }: DraftCo
                               {p.status === 'pending' && <span className="text-xs text-zinc-500">Waiting…</span>}
                               {p.status === 'sending' && <><Loader2 className="h-3.5 w-3.5 animate-spin text-violet-400" /><span className="text-xs text-violet-400">Sending…</span></>}
                               {p.status === 'sent' && <span className="text-xs font-medium text-emerald-400">✓ Sent</span>}
-                              {p.status === 'failed' && <span className="text-xs text-red-400" title={p.error}>✕ Failed</span>}
+                              {p.status === 'failed' && <span className="text-xs text-red-400 text-right max-w-[200px] truncate" title={p.error}>✕ {p.error ?? 'Failed'}</span>}
                             </div>
                           </div>
                         ))}
@@ -674,7 +675,7 @@ function DraftComposer({ company, open, onOpenChange, onSaved, onSent }: DraftCo
                       {/* Select all row */}
                       <div className="flex items-center justify-between mb-1">
                         <p className="text-xs text-zinc-500">
-                          {recipients.length} recipient{recipients.length !== 1 ? 's' : ''} found — select to send individually with a {MULTI_SEND_DELAY_MS / 1000}s delay between each.
+                          {recipients.length} recipient{recipients.length !== 1 ? 's' : ''} found — select to send individually with a random 15–50s delay between each.
                         </p>
                         <button
                           type="button"
@@ -734,7 +735,7 @@ function DraftComposer({ company, open, onOpenChange, onSaved, onSent }: DraftCo
                         <div className="mt-2 rounded-lg border border-white/[0.08] bg-white/[0.04] px-3 py-2 text-xs text-zinc-400">
                           {selectedEmails.size === 1
                             ? <>Sending to: <span className="font-medium text-zinc-200">{[...selectedEmails][0]}</span></>
-                            : <><span className="font-medium text-zinc-200">{selectedEmails.size} recipients</span> selected — emails sent one at a time with a {MULTI_SEND_DELAY_MS / 1000}s gap. Est. ~{Math.round((selectedEmails.size - 1) * MULTI_SEND_DELAY_MS / 1000)}s total.</>
+                            : <><span className="font-medium text-zinc-200">{selectedEmails.size} recipients</span> selected — emails sent one at a time with a random 15–50s gap between each.</>
                           }
                         </div>
                       )}

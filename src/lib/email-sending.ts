@@ -551,7 +551,9 @@ export async function sendInitialCampaignEmailToRecipient({
         attachmentBuffer = await getResumeBufferFromS3(normalizedResumeUrl);
         attachmentName = normalizedResumeUrl.split('/').pop() || 'resume.pdf';
       } catch (error) {
-        console.warn('Unable to fetch resume attachment for batch send, continuing without attachment.', error);
+        // Fail hard — don't send the email without the resume
+        const message = error instanceof Error ? error.message : 'Unable to fetch resume from S3.';
+        throw new Error(`Resume attachment could not be loaded: ${message}. Please re-upload your resume and try again.`);
       }
     }
 
