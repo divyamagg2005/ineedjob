@@ -22,6 +22,7 @@ import { fetchCompanies, blacklistCompany, type Company } from '@/app/actions/co
 import { saveDraftForCompany, loadDraftForCompany } from '@/app/actions/campaign-drafts';
 import { uploadResumeForCompany, getResumeDownloadUrl } from '@/app/actions/resumes';
 import { getCompanyOutreachHistory, type CompanyOutreachHistoryRow } from '@/app/actions/outreach-history';
+import { loadCompanyRecipients } from '@/app/actions/outreach-batch';
 import { getStoredUser } from '@/lib/google-auth';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import * as Dialog from '@radix-ui/react-dialog';
@@ -318,6 +319,9 @@ interface DraftComposerProps {
   onSent: () => void;
 }
 
+// Step 1: compose  Step 2: pick recipient and confirm send
+type ComposerStep = 'compose' | 'pick-recipient';
+
 function DraftComposer({ company, open, onOpenChange, onSaved, onSent }: DraftComposerProps) {
   const [subject, setSubject] = useState('');
   const [body, setBody] = useState('');
@@ -326,6 +330,10 @@ function DraftComposer({ company, open, onOpenChange, onSaved, onSent }: DraftCo
   const [isSending, setIsSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasLoaded, setHasLoaded] = useState(false);
+  const [step, setStep] = useState<ComposerStep>('compose');
+  const [recipients, setRecipients] = useState<{ email: string; source: string | null; verified: boolean | null }[]>([]);
+  const [selectedRecipient, setSelectedRecipient] = useState<string>('');
+  const [isLoadingRecipients, setIsLoadingRecipients] = useState(false);
 
   const currentUser = getStoredUser();
 
@@ -334,13 +342,13 @@ function DraftComposer({ company, open, onOpenChange, onSaved, onSent }: DraftCo
     setBody('');
     setError(null);
     setHasLoaded(false);
+    setStep('compose');
+    setRecipients([]);
+    setSelectedRecipient('');
   }, []);
 
   React.useEffect(() => {
-    if (!open || !company) {
-      return;
-    }
-
+    if (!open || !company) return;
     const loadDraft = async () => {
       resetDraftForm();
       setIsLoading(true);
@@ -359,29 +367,22 @@ function DraftComposer({ company, open, onOpenChange, onSaved, onSent }: DraftCo
         setHasLoaded(true);
       }
     };
-
     loadDraft();
   }, [company?.id, currentUser?.accessToken, open, resetDraftForm]);
 
   const handleSave = async () => {
     if (!company || isSaving || isLoading) return;
-
     const trimmedSubject = subject.trim();
     const trimmedBody = body.trim();
-
     if (!trimmedSubject || !trimmedBody) {
       setError('Please enter both a subject and email body before saving.');
       return;
     }
-
     setIsSaving(true);
     setError(null);
     try {
       const result = await saveDraftForCompany({ companyId: company.id, subject: trimmedSubject, body: trimmedBody }, currentUser?.accessToken);
-      if (!result.success) {
-        throw new Error(result.error ?? 'Unable to save draft.');
-      }
-
+      if (!result.success) throw new Error(result.error ?? 'Unable to save draft.');
       toast.success('Draft saved successfully.');
       onSaved();
       onOpenChange(false);
@@ -392,47 +393,71 @@ function DraftComposer({ company, open, onOpenChange, onSaved, onSent }: DraftCo
     }
   };
 
-  const handleSend = async () => {
-    if (!company || isSending || isSaving || isLoading) return;
-
+  // Step 1 → Step 2: validate compose fields, save draft, load recipients
+  const handleProceedToRecipient = async () => {
+    if (!company || isSaving || isLoading) return;
     const trimmedSubject = subject.trim();
     const trimmedBody = body.trim();
-
     if (!trimmedSubject || !trimmedBody) {
       setError('Please enter both a subject and email body before sending.');
       return;
     }
-
     if (!currentUser?.accessToken) {
       setError('You must be signed in to send emails.');
       return;
     }
+    setIsSaving(true);
+    setError(null);
+    try {
+      const saveResult = await saveDraftForCompany({ companyId: company.id, subject: trimmedSubject, body: trimmedBody }, currentUser.accessToken);
+      if (!saveResult.success) throw new Error(saveResult.error ?? 'Unable to save draft.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to save draft.');
+      setIsSaving(false);
+      return;
+    }
+    setIsSaving(false);
 
+    // Load recipients for this company
+    setIsLoadingRecipients(true);
+    try {
+      const result = await loadCompanyRecipients(company.company_name, currentUser.accessToken);
+      const list = (result.recipients ?? []).map((r) => ({
+        email: r.email,
+        source: r.source ?? null,
+        verified: r.verified ?? null,
+      }));
+      setRecipients(list);
+      setSelectedRecipient(list[0]?.email ?? '');
+      setStep('pick-recipient');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to load recipients.');
+    } finally {
+      setIsLoadingRecipients(false);
+    }
+  };
+
+  // Step 2: actually send to selected recipient
+  const handleConfirmSend = async () => {
+    if (!company || !currentUser?.accessToken || isSending) return;
+    if (!selectedRecipient) {
+      setError('Please select a recipient.');
+      return;
+    }
     setIsSending(true);
     setError(null);
     try {
-      // Save draft first to persist subject/body
-      const saveResult = await saveDraftForCompany({ companyId: company.id, subject: trimmedSubject, body: trimmedBody }, currentUser.accessToken);
-      if (!saveResult.success) {
-        throw new Error(saveResult.error ?? 'Unable to save draft before sending.');
-      }
-
-      // Now send via the API route
       const response = await fetch('/api/outreach/send', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'x-google-access-token': currentUser.accessToken,
         },
-        body: JSON.stringify({ companyId: company.id, followUp: false }),
+        body: JSON.stringify({ companyId: company.id, recipientEmail: selectedRecipient, followUp: false }),
       });
-
       const result = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(result?.error ?? 'Failed to send email.');
-      }
-
-      toast.success(`Email sent to ${company.company_name}.`);
+      if (!response.ok) throw new Error(result?.error ?? 'Failed to send email.');
+      toast.success(`Email sent to ${selectedRecipient}.`);
       onSent();
       onOpenChange(false);
     } catch (err) {
@@ -443,75 +468,189 @@ function DraftComposer({ company, open, onOpenChange, onSaved, onSent }: DraftCo
   };
 
   const handleDialogOpenChange = (nextOpen: boolean) => {
-    if (!nextOpen) {
-      resetDraftForm();
-    }
+    if (!nextOpen) resetDraftForm();
     onOpenChange(nextOpen);
   };
 
-  if (!open || !company) {
-    return null;
-  }
+  if (!open || !company) return null;
 
   return (
     <Dialog.Root open={open} onOpenChange={handleDialogOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm" />
         <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-full max-w-2xl -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-white/[0.08] bg-zinc-900 p-6 shadow-2xl shadow-black/50 focus:outline-none">
+
+          {/* Header */}
           <div className="mb-5 flex items-start justify-between gap-4">
             <div>
-              <Dialog.Title className="text-lg font-semibold text-white">Email Draft</Dialog.Title>
-              <p className="mt-1 text-sm text-zinc-500">Compose a draft for {company.company_name}.</p>
+              <Dialog.Title className="text-lg font-semibold text-white">
+                {step === 'compose' ? 'Email Draft' : 'Select Recipient'}
+              </Dialog.Title>
+              <p className="mt-1 text-sm text-zinc-500">
+                {step === 'compose'
+                  ? `Compose a draft for ${company.company_name}.`
+                  : `Choose who to send this email to at ${company.company_name}.`}
+              </p>
             </div>
-            <div className="rounded-full border border-white/[0.08] bg-white/[0.04] px-2.5 py-1 text-xs font-medium text-zinc-400">
-              {hasLoaded ? 'Loaded' : 'Loading...'}
+            <div className="flex items-center gap-2">
+              {step === 'pick-recipient' && (
+                <button
+                  onClick={() => { setStep('compose'); setError(null); }}
+                  className="rounded-lg border border-white/[0.08] bg-white/[0.04] px-2.5 py-1 text-xs font-medium text-zinc-400 hover:bg-white/[0.08] transition-colors"
+                >
+                  ← Back
+                </button>
+              )}
+              <div className="rounded-full border border-white/[0.08] bg-white/[0.04] px-2.5 py-1 text-xs font-medium text-zinc-400">
+                {step === 'compose' ? (hasLoaded ? 'Step 1 of 2' : 'Loading...') : 'Step 2 of 2'}
+              </div>
             </div>
           </div>
 
-          {error ? (
+          {error && (
             <div className="mb-4 rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-400">{error}</div>
-          ) : null}
+          )}
 
-          <div className="space-y-4">
-            <div>
-              <label className="mb-2 block text-sm font-medium text-zinc-300">Company Name</label>
-              <Input value={company.company_name} readOnly className="bg-white/[0.04] border-white/[0.08] text-zinc-200" />
+          {/* Step 1: Compose */}
+          {step === 'compose' && (
+            <div className="space-y-4">
+              <div>
+                <label className="mb-2 block text-sm font-medium text-zinc-300">Company Name</label>
+                <Input value={company.company_name} readOnly className="bg-white/[0.04] border-white/[0.08] text-zinc-200" />
+              </div>
+              <div>
+                <label className="mb-2 block text-sm font-medium text-zinc-300">Subject</label>
+                <Input
+                  value={subject}
+                  onChange={(e) => setSubject(e.target.value)}
+                  placeholder="Enter a subject"
+                  className="bg-white/[0.04] border-white/[0.08] text-zinc-200"
+                />
+              </div>
+              <div>
+                <label className="mb-2 block text-sm font-medium text-zinc-300">Email Body</label>
+                <textarea
+                  value={body}
+                  onChange={(e) => setBody(e.target.value)}
+                  placeholder="Write your outreach email"
+                  rows={10}
+                  className="min-h-[220px] w-full rounded-lg border border-white/[0.08] bg-white/[0.04] px-3 py-2 text-sm text-zinc-200 outline-none focus:border-violet-500/40"
+                />
+              </div>
+              <div className="rounded-lg border border-white/[0.08] bg-white/[0.04] p-3 text-sm text-zinc-400">
+                <span className="font-medium text-zinc-300">Resume:</span>{' '}
+                {company.has_resume ? 'Attached' : 'No resume attached yet'}
+              </div>
             </div>
-            <div>
-              <label className="mb-2 block text-sm font-medium text-zinc-300">Subject</label>
-              <Input
-                value={subject}
-                onChange={(e) => setSubject(e.target.value)}
-                placeholder="Enter a subject"
-                className="bg-white/[0.04] border-white/[0.08] text-zinc-200"
-              />
-            </div>
-            <div>
-              <label className="mb-2 block text-sm font-medium text-zinc-300">Email Body</label>
-              <textarea
-                value={body}
-                onChange={(e) => setBody(e.target.value)}
-                placeholder="Write your outreach email"
-                rows={10}
-                className="min-h-[220px] w-full rounded-lg border border-white/[0.08] bg-white/[0.04] px-3 py-2 text-sm text-zinc-200 outline-none focus:border-violet-500/40"
-              />
-            </div>
-            <div className="rounded-lg border border-white/[0.08] bg-white/[0.04] p-3 text-sm text-zinc-400">
-              <span className="font-medium text-zinc-300">Resume:</span>{' '}
-              {company.has_resume ? 'Attached' : 'No resume attached yet'}
-            </div>
-          </div>
+          )}
 
+          {/* Step 2: Pick recipient */}
+          {step === 'pick-recipient' && (
+            <div className="space-y-3">
+              {isLoadingRecipients ? (
+                <div className="flex items-center gap-2 py-8 justify-center text-sm text-zinc-400">
+                  <Loader2 className="h-4 w-4 animate-spin" /> Loading recipients…
+                </div>
+              ) : recipients.length === 0 ? (
+                <div className="rounded-lg border border-dashed border-white/[0.08] bg-white/[0.04] p-6 text-center text-sm text-zinc-500">
+                  No email addresses found for {company.company_name}.
+                </div>
+              ) : (
+                <>
+                  <p className="text-xs text-zinc-500 mb-3">
+                    {recipients.length} recipient{recipients.length !== 1 ? 's' : ''} found — select one to send to.
+                  </p>
+                  <div className="max-h-[320px] overflow-y-auto space-y-2 pr-1">
+                    {recipients.map((r) => (
+                      <button
+                        key={r.email}
+                        type="button"
+                        onClick={() => setSelectedRecipient(r.email)}
+                        className={`w-full flex items-center justify-between rounded-lg border px-4 py-3 text-left text-sm transition-colors ${
+                          selectedRecipient === r.email
+                            ? 'border-violet-500/40 bg-violet-500/10 text-violet-200'
+                            : 'border-white/[0.08] bg-white/[0.03] text-zinc-300 hover:bg-white/[0.06]'
+                        }`}
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className={`h-4 w-4 rounded-full border-2 shrink-0 flex items-center justify-center ${
+                            selectedRecipient === r.email ? 'border-violet-500 bg-violet-500' : 'border-zinc-600'
+                          }`}>
+                            {selectedRecipient === r.email && (
+                              <div className="h-1.5 w-1.5 rounded-full bg-white" />
+                            )}
+                          </div>
+                          <span className="font-medium">{r.email}</span>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          {r.verified && (
+                            <span className="rounded-full bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 text-[11px] font-medium text-emerald-400">
+                              Verified
+                            </span>
+                          )}
+                          {r.source && (
+                            <span className="rounded-full bg-white/[0.06] border border-white/[0.08] px-2 py-0.5 text-[11px] text-zinc-500">
+                              {r.source}
+                            </span>
+                          )}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                  {selectedRecipient && (
+                    <div className="mt-3 rounded-lg border border-white/[0.08] bg-white/[0.04] px-3 py-2 text-xs text-zinc-400">
+                      Sending to: <span className="font-medium text-zinc-200">{selectedRecipient}</span>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
+          {/* Footer buttons */}
           <div className="mt-6 flex justify-end gap-3">
-            <Button variant="outline" className="border-white/[0.08] bg-white/[0.04] text-zinc-300" onClick={() => handleDialogOpenChange(false)} disabled={isSaving || isSending || isLoading}>
+            <Button
+              variant="outline"
+              className="border-white/[0.08] bg-white/[0.04] text-zinc-300"
+              onClick={() => handleDialogOpenChange(false)}
+              disabled={isSaving || isSending || isLoading}
+            >
               Cancel
             </Button>
-            <Button variant="outline" className="border-white/[0.08] bg-white/[0.04] text-zinc-300 hover:bg-white/[0.08]" onClick={handleSave} disabled={isSaving || isSending || isLoading}>
-              {isSaving ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Saving...</> : 'Save Draft'}
-            </Button>
-            <Button className="bg-violet-600 hover:bg-violet-700 shadow-lg shadow-violet-900/30" onClick={handleSend} disabled={isSaving || isSending || isLoading}>
-              {isSending ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Sending...</> : <><Send className="mr-2 h-4 w-4" /> Send Email</>}
-            </Button>
+
+            {step === 'compose' && (
+              <>
+                <Button
+                  variant="outline"
+                  className="border-white/[0.08] bg-white/[0.04] text-zinc-300 hover:bg-white/[0.08]"
+                  onClick={handleSave}
+                  disabled={isSaving || isSending || isLoading}
+                >
+                  {isSaving ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Saving...</> : 'Save Draft'}
+                </Button>
+                <Button
+                  className="bg-violet-600 hover:bg-violet-700 shadow-lg shadow-violet-900/30"
+                  onClick={handleProceedToRecipient}
+                  disabled={isSaving || isSending || isLoading || isLoadingRecipients}
+                >
+                  {isSaving || isLoadingRecipients
+                    ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading…</>
+                    : <><Send className="mr-2 h-4 w-4" /> Send Email…</>}
+                </Button>
+              </>
+            )}
+
+            {step === 'pick-recipient' && (
+              <Button
+                className="bg-violet-600 hover:bg-violet-700 shadow-lg shadow-violet-900/30"
+                onClick={handleConfirmSend}
+                disabled={isSending || !selectedRecipient || recipients.length === 0}
+              >
+                {isSending
+                  ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Sending…</>
+                  : <><Send className="mr-2 h-4 w-4" /> Confirm & Send</>}
+              </Button>
+            )}
           </div>
         </Dialog.Content>
       </Dialog.Portal>
