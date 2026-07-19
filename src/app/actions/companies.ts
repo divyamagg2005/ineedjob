@@ -102,9 +102,20 @@ export async function fetchCompanies(accessToken?: string | null): Promise<Compa
 
 export async function blacklistCompany(companyId: number, companyName: string, accessToken?: string | null): Promise<void> {
   try {
-    await getAuthenticatedUserContext(undefined, undefined, accessToken);
+    const authenticatedUser = await getAuthenticatedUserContext(undefined, undefined, accessToken);
 
-    // Call the stored procedure to blacklist the company
+    const ownership = await query<{ id: number }>(
+      `SELECT id
+       FROM outreach_campaigns
+       WHERE user_id = $1 AND company_id = $2
+       LIMIT 1`,
+      [authenticatedUser.id, companyId]
+    );
+
+    if (!ownership.rows[0]?.id) {
+      throw new Error('The selected company is not available for your account.');
+    }
+
     await query(
       `SELECT blacklist_company($1, $2)`,
       [companyId, companyName]

@@ -1,6 +1,42 @@
-import { query } from '@/lib/db';
+import { query, transaction } from '@/lib/db';
 import { getAuthenticatedUserContext, AuthError } from '@/lib/user-context';
 import { getResumeBufferFromS3 } from '@/lib/s3';
+
+const DEFAULT_MAX_INITIAL_SENDS_PER_HOUR = 8;
+const DEFAULT_MAX_BATCH_SENDS_PER_HOUR = 20;
+
+function getConfiguredSendLimit(defaultValue: number, envVarName: string): number {
+  const configuredValue = Number.parseInt(process.env[envVarName] ?? '', 10);
+  return Number.isFinite(configuredValue) && configuredValue > 0 ? configuredValue : defaultValue;
+}
+
+function normalizeRecipientValue(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function isValidRecipientAddress(value: string | null | undefined): boolean {
+  const normalized = normalizeRecipientValue(value);
+  if (!normalized) {
+    return false;
+  }
+
+  const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return emailPattern.test(normalized);
+}
+
+function getSendContextLogFields({ campaignId, companyId, recipientEmail, followUp }: { campaignId?: number | null; companyId?: number | null; recipientEmail?: string | null; followUp?: boolean }) {
+  return {
+    campaignId: campaignId ?? null,
+    companyId: companyId ?? null,
+    recipientEmail: recipientEmail ? recipientEmail.replace(/(.{2}).+(@.*)/, '$1***$2') : null,
+    followUp: Boolean(followUp),
+  };
+}
 
 export interface SendCampaignResult {
   success: boolean;
@@ -337,6 +373,30 @@ async function resolveRecipientEmailForCompany({
   };
 }
 
+async function ensureCompanyAccess({
+  userId,
+  companyId,
+}: {
+  userId: string;
+  companyId: number | null;
+}): Promise<void> {
+  if (!companyId) {
+    return;
+  }
+
+  const result = await query<{ id: number }>(
+    `SELECT id
+     FROM outreach_campaigns
+     WHERE user_id = $1 AND company_id = $2
+     LIMIT 1`,
+    [userId, companyId]
+  );
+
+  if (!result.rows[0]?.id) {
+    throw new Error('The selected company is not available for your account.');
+  }
+}
+
 async function findExistingSentCampaign({
   userId,
   companyId,
@@ -389,6 +449,13 @@ export async function sendInitialCampaignEmailToRecipient({
   const normalizedSubject = normalizeText(emailSubject);
   const normalizedBody = normalizeText(emailBody);
   const normalizedResumeUrl = normalizeText(resumeUrl);
+  const normalizedRecipient = normalizeRecipientValue(recipientEmail);
+
+  if (!normalizedRecipient || !isValidRecipientAddress(normalizedRecipient)) {
+    return { success: false, error: 'Please provide a valid recipient email address.', status: 'FAILED', recipient: normalizedRecipient ?? recipientEmail };
+  }
+
+  await ensureCompanyAccess({ userId: authenticatedUser.id, companyId: companyId ?? null });
 
   if (!normalizedSubject) {
     return { success: false, error: 'This campaign is missing a subject.', status: 'FAILED', recipient: recipientEmail };
@@ -400,7 +467,7 @@ export async function sendInitialCampaignEmailToRecipient({
 
   const { recipientEmail: resolvedRecipientEmail, recruiterEmailId } = await resolveRecipientEmailForCompany({
     companyId: companyId ?? null,
-    recipientEmail,
+    recipientEmail: normalizedRecipient,
   });
 
   const existingSentCampaignId = await findExistingSentCampaign({
@@ -431,8 +498,9 @@ export async function sendInitialCampaignEmailToRecipient({
     [authenticatedUser.id]
   );
 
+  const maxInitialSendsPerHour = getConfiguredSendLimit(DEFAULT_MAX_INITIAL_SENDS_PER_HOUR, 'INITIAL_EMAILS_PER_HOUR');
   const recentSentCount = Number.parseInt(recentSentResult.rows[0]?.count ?? '0', 10);
-  if (recentSentCount >= 8) {
+  if (recentSentCount >= maxInitialSendsPerHour) {
     return {
       success: false,
       error: 'Per-user send limit reached. Please wait before sending more initial campaigns.',
@@ -441,34 +509,39 @@ export async function sendInitialCampaignEmailToRecipient({
     };
   }
 
-  const campaignInsert = await query<{ id: number }>(
-    `INSERT INTO outreach_campaigns (
-      user_id,
-      company_id,
-      recruiter_email_id,
-      email_subject,
-      email_body,
-      resume_url,
-      status,
-      created_at,
-      updated_at
-    ) VALUES ($1, $2, $3, $4, $5, $6, 'QUEUED', NOW(), NOW())
-     RETURNING id`,
-    [authenticatedUser.id, companyId ?? null, recruiterEmailId ?? null, normalizedSubject, normalizedBody, normalizedResumeUrl]
-  );
+  const campaignId = await transaction(async (client) => {
+    const campaignInsert = await client.query<{ id: number }>(
+      `INSERT INTO outreach_campaigns (
+        user_id,
+        company_id,
+        recruiter_email_id,
+        email_subject,
+        email_body,
+        resume_url,
+        status,
+        created_at,
+        updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, 'QUEUED', NOW(), NOW())
+       RETURNING id`,
+      [authenticatedUser.id, companyId ?? null, recruiterEmailId ?? null, normalizedSubject, normalizedBody, normalizedResumeUrl]
+    );
 
-  const campaignId = campaignInsert.rows[0]?.id;
-  if (!campaignId) {
-    throw new Error('Unable to create a recipient campaign record.');
-  }
+    const insertedCampaignId = campaignInsert.rows[0]?.id;
+    if (!insertedCampaignId) {
+      throw new Error('Unable to create a recipient campaign record.');
+    }
 
-  try {
-    await query(
+    await client.query(
       `UPDATE outreach_campaigns
        SET status = 'SENDING', updated_at = NOW()
        WHERE id = $1 AND user_id = $2`,
-      [campaignId, authenticatedUser.id]
+      [insertedCampaignId, authenticatedUser.id]
     );
+
+    return insertedCampaignId;
+  });
+
+  try {
 
     let attachmentBuffer: Buffer | null = null;
     let attachmentName: string | null = null;
@@ -509,6 +582,7 @@ export async function sendInitialCampaignEmailToRecipient({
       const errorMessage = typeof gmailPayload?.error?.message === 'string'
         ? gmailPayload.error.message
         : 'Gmail rejected the message.';
+      console.warn('Gmail send failed for initial outreach.', getSendContextLogFields({ campaignId, companyId, recipientEmail: resolvedRecipientEmail, followUp: false }));
       throw new Error(errorMessage);
     }
 
@@ -575,36 +649,46 @@ export async function sendInitialCampaignEmail({
 }): Promise<SendCampaignResult> {
   const authenticatedUser = await getAuthenticatedUserContext(undefined, undefined, accessToken);
 
-  const campaignQuery = await query<CampaignRow>(
-    `SELECT id, user_id, company_id, recruiter_email_id, email_subject, email_body, resume_url, status
-     FROM outreach_campaigns
-     WHERE user_id = $1
-       AND (($2::bigint IS NOT NULL AND id = $2) OR ($3::bigint IS NOT NULL AND company_id = $3))
-     ORDER BY created_at DESC, id DESC
-     LIMIT 1`,
-    [authenticatedUser.id, campaignId ?? null, companyId ?? null]
-  );
+  const campaign = await transaction(async (client) => {
+    const campaignQuery = await client.query<CampaignRow>(
+      `SELECT id, user_id, company_id, recruiter_email_id, email_subject, email_body, resume_url, status
+       FROM outreach_campaigns
+       WHERE user_id = $1
+         AND (($2::bigint IS NOT NULL AND id = $2) OR ($3::bigint IS NOT NULL AND company_id = $3))
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1
+       FOR UPDATE`,
+      [authenticatedUser.id, campaignId ?? null, companyId ?? null]
+    );
 
-  const campaign = campaignQuery.rows[0];
+    const row = campaignQuery.rows[0];
+    if (!row) {
+      throw new Error('Campaign not found or access denied.');
+    }
+
+    const normalizedStatus = normalizeStatusValue(row.status);
+    if (normalizedStatus === 'SENT' || normalizedStatus === 'COMPLETED' || normalizedStatus === 'PARTIALLY SENT') {
+      throw new Error('This campaign has already been sent.');
+    }
+
+    if (normalizedStatus === 'SENDING' || normalizedStatus === 'QUEUED') {
+      throw new Error('A send request is already in progress for this campaign.');
+    }
+
+    await client.query(
+      `UPDATE outreach_campaigns
+       SET status = 'SENDING', updated_at = NOW()
+       WHERE id = $1 AND user_id = $2`,
+      [row.id, authenticatedUser.id]
+    );
+
+    return row;
+  });
   if (!campaign) {
     throw new Error('Campaign not found or access denied.');
   }
 
-  const normalizedStatus = normalizeStatusValue(campaign.status);
-  if (normalizedStatus === 'SENT' || normalizedStatus === 'COMPLETED' || normalizedStatus === 'PARTIALLY SENT') {
-    throw new Error('This campaign has already been sent.');
-  }
-
-  if (normalizedStatus === 'SENDING' || normalizedStatus === 'QUEUED') {
-    throw new Error('A send request is already in progress for this campaign.');
-  }
-
-  await query(
-    `UPDATE outreach_campaigns
-     SET status = 'SENDING', updated_at = NOW()
-     WHERE id = $1 AND user_id = $2`,
-    [campaign.id, authenticatedUser.id]
-  );
+  await ensureCompanyAccess({ userId: authenticatedUser.id, companyId: campaign.company_id });
 
   const subject = normalizeText(campaign.email_subject);
   const body = normalizeText(campaign.email_body);
@@ -705,37 +789,46 @@ export async function sendFollowUpCampaignEmail({
 }): Promise<SendCampaignResult> {
   const authenticatedUser = await getAuthenticatedUserContext(undefined, undefined, accessToken);
 
-  const campaignQuery = await query<CampaignRow>(
-    `SELECT id, user_id, company_id, recruiter_email_id, email_subject, email_body, resume_url, status, followup_count, last_sent_at, next_followup_at
-     FROM outreach_campaigns
-     WHERE user_id = $1
-       AND (($2::bigint IS NOT NULL AND id = $2) OR ($3::bigint IS NOT NULL AND company_id = $3))
-     ORDER BY created_at DESC, id DESC
-     LIMIT 1`,
-    [authenticatedUser.id, campaignId ?? null, companyId ?? null]
-  );
+  const campaign = await transaction(async (client) => {
+    const campaignQuery = await client.query<CampaignRow>(
+      `SELECT id, user_id, company_id, recruiter_email_id, email_subject, email_body, resume_url, status, followup_count, last_sent_at, next_followup_at
+       FROM outreach_campaigns
+       WHERE user_id = $1
+         AND (($2::bigint IS NOT NULL AND id = $2) OR ($3::bigint IS NOT NULL AND company_id = $3))
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1
+       FOR UPDATE`,
+      [authenticatedUser.id, campaignId ?? null, companyId ?? null]
+    );
 
-  const campaign = campaignQuery.rows[0];
-  if (!campaign) {
-    throw new Error('Campaign not found or access denied.');
-  }
+    const row = campaignQuery.rows[0];
+    if (!row) {
+      throw new Error('Campaign not found or access denied.');
+    }
+
+    const eligibility = getFollowUpEligibility(row);
+    if (!eligibility.eligible) {
+      throw new Error(eligibility.reason);
+    }
+
+    const normalizedStatus = normalizeStatusValue(row.status);
+    if (normalizedStatus === 'SENDING' || normalizedStatus === 'QUEUED') {
+      throw new Error('A send request is already in progress for this campaign.');
+    }
+
+    await client.query(
+      `UPDATE outreach_campaigns
+       SET status = 'SENDING', updated_at = NOW()
+       WHERE id = $1 AND user_id = $2`,
+      [row.id, authenticatedUser.id]
+    );
+
+    return row;
+  });
 
   const eligibility = getFollowUpEligibility(campaign);
-  if (!eligibility.eligible) {
-    throw new Error(eligibility.reason);
-  }
 
-  const normalizedStatus = normalizeStatusValue(campaign.status);
-  if (normalizedStatus === 'SENDING' || normalizedStatus === 'QUEUED') {
-    throw new Error('A send request is already in progress for this campaign.');
-  }
-
-  await query(
-    `UPDATE outreach_campaigns
-     SET status = 'SENDING', updated_at = NOW()
-     WHERE id = $1 AND user_id = $2`,
-    [campaign.id, authenticatedUser.id]
-  );
+  await ensureCompanyAccess({ userId: authenticatedUser.id, companyId: campaign.company_id });
 
   const subject = normalizeText(campaign.email_subject);
   const body = normalizeText(campaign.email_body);
@@ -760,6 +853,7 @@ export async function sendFollowUpCampaignEmail({
 
   const senderEmail = authenticatedUser.email;
   const attachmentName = (resumeKey ?? '').split('/').pop() || 'resume.pdf';
+  const logContext = getSendContextLogFields({ campaignId: campaign.id, companyId: campaign.company_id, recipientEmail: recipientEmail, followUp: true });
   const followUpSubject = buildFollowUpSubject({ originalSubject: subject, followUpNumber: eligibility.followUpNumber });
   const followUpBody = buildFollowUpBody({ originalBody: body, followUpNumber: eligibility.followUpNumber });
   const mimeMessage = createMimeMessage({

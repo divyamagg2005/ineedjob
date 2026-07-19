@@ -1,6 +1,7 @@
 'use server'
 
 import nodemailer from 'nodemailer';
+import { getAuthenticatedUserContext } from '@/lib/user-context';
 
 export async function sendEmail({
   providerToken,
@@ -20,12 +21,14 @@ export async function sendEmail({
   }
 
   try {
+    const authenticatedUser = await getAuthenticatedUserContext(undefined, undefined, providerToken);
+
     // We use the Google Access Token (providerToken) to authenticate with Gmail via OAuth2
     const transporter = nodemailer.createTransport({
       service: 'gmail',
       auth: {
         type: 'OAuth2',
-        user: senderEmail,
+        user: authenticatedUser.email,
         accessToken: providerToken,
       },
     });

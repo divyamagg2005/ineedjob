@@ -478,6 +478,7 @@ export function InternshipsTable() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyRows, setHistoryRows] = useState<CompanyOutreachHistoryRow[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [page, setPage] = useState(1);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [pendingCompanyId, setPendingCompanyId] = useState<number | null>(null);
 
@@ -516,6 +517,15 @@ export function InternshipsTable() {
     c.company_name?.toLowerCase().includes(search.toLowerCase())
   );
 
+  const pageSize = 10;
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const pagedCompanies = filtered.slice((safePage - 1) * pageSize, safePage * pageSize);
+
+  React.useEffect(() => {
+    setPage(1);
+  }, [search]);
+
   const handleResumeClick = useCallback((companyId: number) => {
     setPendingCompanyId(companyId);
     fileInputRef.current?.click();
@@ -544,6 +554,11 @@ export function InternshipsTable() {
 
   const handleSendClick = useCallback(async (company: Company) => {
     if (!currentUser?.accessToken || sendingCompanyId !== null) {
+      return;
+    }
+
+    const confirmed = window.confirm(`Send the outreach email for ${company.company_name}?`);
+    if (!confirmed) {
       return;
     }
 
@@ -696,7 +711,7 @@ export function InternshipsTable() {
                 ) : filtered.length === 0 ? (
                   <EmptyState filtered={search.length > 0} />
                 ) : (
-                  filtered.map((company) => (
+                  pagedCompanies.map((company) => (
                     <tr key={company.id} className="group transition-colors duration-150 hover:bg-white/[0.025]">
                       <td className="px-4 py-3.5">
                         <div className="flex items-center gap-3">
@@ -792,11 +807,20 @@ export function InternshipsTable() {
             </table>
           </div>
           {!isLoading && filtered.length > 0 && (
-            <div className="border-t border-white/[0.06] px-4 py-2.5 bg-zinc-950/40">
+            <div className="flex flex-col gap-3 border-t border-white/[0.06] px-4 py-2.5 bg-zinc-950/40 sm:flex-row sm:items-center sm:justify-between">
               <p className="text-xs text-zinc-600">
-                Showing <span className="text-zinc-400 font-medium">{filtered.length}</span> of{' '}
-                <span className="text-zinc-400 font-medium">{companies.length}</span> companies
+                Showing <span className="text-zinc-400 font-medium">{Math.min(filtered.length, safePage * pageSize)}</span> of{' '}
+                <span className="text-zinc-400 font-medium">{filtered.length}</span> matching companies
               </p>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" className="h-8 border-white/[0.08] bg-white/[0.04] text-zinc-400 hover:bg-white/[0.08] hover:text-zinc-200" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={safePage <= 1}>
+                  Previous
+                </Button>
+                <span className="text-xs text-zinc-500">Page {safePage} / {totalPages}</span>
+                <Button variant="outline" size="sm" className="h-8 border-white/[0.08] bg-white/[0.04] text-zinc-400 hover:bg-white/[0.08] hover:text-zinc-200" onClick={() => setPage((current) => Math.min(totalPages, current + 1))} disabled={safePage >= totalPages}>
+                  Next
+                </Button>
+              </div>
             </div>
           )}
         </div>
