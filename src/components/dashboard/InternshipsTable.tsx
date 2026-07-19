@@ -571,6 +571,9 @@ export function InternshipsTable() {
 
       toast.success(isFollowUpEligible ? `Follow-up sent successfully to ${company.company_name}.` : `Email sent successfully to ${company.company_name}.`);
       queryClient.invalidateQueries({ queryKey: ['companies', currentUser?.email, currentUser?.userId] });
+      queryClient.invalidateQueries({ queryKey: ['dashboardStats'] });
+      queryClient.invalidateQueries({ queryKey: ['hunterStatus'] });
+      queryClient.invalidateQueries({ queryKey: ['databaseStatus'] });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unexpected error.';
       toast.error(message);
