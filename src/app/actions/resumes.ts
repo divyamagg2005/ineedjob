@@ -2,7 +2,7 @@
 
 import { query } from '@/lib/db';
 import { getAuthenticatedUserContext } from '@/lib/user-context';
-import { ALLOWED_RESUME_MIME_TYPES, MAX_RESUME_SIZE_BYTES, buildResumeObjectKey, deleteResumeFromS3, uploadResumeToS3 } from '@/lib/s3';
+import { ALLOWED_RESUME_MIME_TYPES, MAX_RESUME_SIZE_BYTES, buildResumeObjectKey, deleteResumeFromS3, uploadResumeToS3, getResumePresignedUrl } from '@/lib/s3';
 
 export interface ResumeUploadResult {
   success: boolean;
@@ -155,5 +155,28 @@ export async function removeResumeForCompany(companyId: number, accessToken?: st
       success: false,
       error: error instanceof Error ? error.message : 'Unexpected error.',
     };
+  }
+}
+
+export async function getResumeDownloadUrl(companyId: number, accessToken?: string | null): Promise<{ success: boolean; url?: string; fileName?: string; error?: string }> {
+  try {
+    const authenticatedUser = await getAuthenticatedUserContext(undefined, undefined, accessToken);
+
+    const result = await query<{ resume_url: string | null; resume_file_name: string | null }>(
+      `SELECT resume_url, resume_file_name FROM outreach_campaigns WHERE user_id = $1 AND company_id = $2 ORDER BY created_at DESC LIMIT 1`,
+      [authenticatedUser.id, companyId]
+    );
+
+    const objectKey = result.rows[0]?.resume_url;
+    if (!objectKey) {
+      return { success: false, error: 'No resume found for this company.' };
+    }
+
+    const fileName = result.rows[0]?.resume_file_name ?? 'resume.pdf';
+    const url = await getResumePresignedUrl(objectKey, fileName);
+    return { success: true, url, fileName };
+  } catch (error) {
+    console.error('Resume download URL generation failed:', error);
+    return { success: false, error: error instanceof Error ? error.message : 'Unexpected error.' };
   }
 }

@@ -15,11 +15,12 @@ import {
   AlertTriangle,
   FileText,
   Send,
+  Download,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { fetchCompanies, blacklistCompany, type Company } from '@/app/actions/companies';
 import { saveDraftForCompany, loadDraftForCompany } from '@/app/actions/campaign-drafts';
-import { uploadResumeForCompany } from '@/app/actions/resumes';
+import { uploadResumeForCompany, getResumeDownloadUrl } from '@/app/actions/resumes';
 import { getCompanyOutreachHistory, type CompanyOutreachHistoryRow } from '@/app/actions/outreach-history';
 import { getStoredUser } from '@/lib/google-auth';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
@@ -474,6 +475,7 @@ export function InternshipsTable() {
   const [composerOpen, setComposerOpen] = useState(false);
   const [savingDraft, setSavingDraft] = useState(false);
   const [sendingCompanyId, setSendingCompanyId] = useState<number | null>(null);
+  const [downloadingCompanyId, setDownloadingCompanyId] = useState<number | null>(null);
   const [historyCompany, setHistoryCompany] = useState<Company | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyRows, setHistoryRows] = useState<CompanyOutreachHistoryRow[]>([]);
@@ -530,6 +532,24 @@ export function InternshipsTable() {
     setPendingCompanyId(companyId);
     fileInputRef.current?.click();
   }, []);
+
+  const handleResumeDownload = useCallback(async (company: Company) => {
+    if (downloadingCompanyId !== null) return;
+    setDownloadingCompanyId(company.id);
+    try {
+      const result = await getResumeDownloadUrl(company.id, currentUser?.accessToken);
+      if (!result.success || !result.url) {
+        throw new Error(result.error ?? 'Could not generate download link.');
+      }
+      // Open the presigned URL in a new tab — browser will trigger the download
+      window.open(result.url, '_blank', 'noopener,noreferrer');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Download failed.';
+      toast.error(message);
+    } finally {
+      setDownloadingCompanyId(null);
+    }
+  }, [currentUser?.accessToken, downloadingCompanyId]);
 
   const handleEmailClick = useCallback((company: Company) => {
     setComposerCompany(company);
@@ -729,19 +749,44 @@ export function InternshipsTable() {
                         </span>
                       </td>
                       <td className="px-4 py-3.5">
-                        <button
-                          type="button"
-                          className="inline-flex items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.04] px-2.5 py-1.5 text-xs font-medium text-zinc-300 transition-colors hover:bg-white/[0.08]"
-                          onClick={() => handleResumeClick(company.id)}
-                          disabled={uploadingCompanyId === company.id}
-                        >
-                          <FileText className="h-3.5 w-3.5" />
-                          {uploadingCompanyId === company.id
-                            ? 'Uploading...'
-                            : resumeAttachedCompanyIds[company.id] || company.has_resume
-                              ? 'Resume Attached'
-                              : 'Upload Resume'}
-                        </button>
+                        {resumeAttachedCompanyIds[company.id] || company.has_resume ? (
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              className="inline-flex items-center gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1.5 text-xs font-medium text-emerald-300 transition-colors hover:bg-emerald-500/20 disabled:opacity-50"
+                              onClick={() => handleResumeDownload(company)}
+                              disabled={downloadingCompanyId === company.id}
+                              title="Download resume"
+                            >
+                              {downloadingCompanyId === company.id
+                                ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                : <Download className="h-3.5 w-3.5" />}
+                              {downloadingCompanyId === company.id ? 'Loading…' : 'Download'}
+                            </button>
+                            <button
+                              type="button"
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-white/[0.08] bg-white/[0.04] px-2 py-1.5 text-xs font-medium text-zinc-400 transition-colors hover:bg-white/[0.08] disabled:opacity-50"
+                              onClick={() => handleResumeClick(company.id)}
+                              disabled={uploadingCompanyId === company.id}
+                              title="Replace resume"
+                            >
+                              {uploadingCompanyId === company.id
+                                ? <Loader2 className="h-3 w-3 animate-spin" />
+                                : <FileText className="h-3 w-3" />}
+                              {uploadingCompanyId === company.id ? 'Uploading…' : 'Replace'}
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            className="inline-flex items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.04] px-2.5 py-1.5 text-xs font-medium text-zinc-300 transition-colors hover:bg-white/[0.08] disabled:opacity-50"
+                            onClick={() => handleResumeClick(company.id)}
+                            disabled={uploadingCompanyId === company.id}
+                          >
+                            <FileText className="h-3.5 w-3.5" />
+                            {uploadingCompanyId === company.id ? 'Uploading...' : 'Upload Resume'}
+                          </button>
+                        )}
                       </td>
                       <td className="px-4 py-3.5">
                         <button

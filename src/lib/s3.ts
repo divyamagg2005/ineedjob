@@ -1,4 +1,5 @@
 import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 const region = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || 'us-east-1';
 const bucket = process.env.AWS_S3_BUCKET;
@@ -62,6 +63,22 @@ export async function deleteResumeFromS3(objectKey?: string | null): Promise<voi
     Bucket: bucket,
     Key: objectKey,
   }));
+}
+
+export async function getResumePresignedUrl(objectKey: string, fileName?: string): Promise<string> {
+  if (!bucket) {
+    throw new Error('S3 bucket is not configured.');
+  }
+
+  const command = new GetObjectCommand({
+    Bucket: bucket,
+    Key: objectKey,
+    ResponseContentDisposition: `attachment; filename="${fileName ?? 'resume.pdf'}"`,
+    ResponseContentType: 'application/pdf',
+  });
+
+  // URL valid for 15 minutes
+  return getSignedUrl(s3Client, command, { expiresIn: 900 });
 }
 
 export async function getResumeBufferFromS3(objectKey: string): Promise<Buffer> {
