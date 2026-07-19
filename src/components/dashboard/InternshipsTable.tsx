@@ -20,6 +20,7 @@ import { toast } from 'sonner';
 import { fetchCompanies, blacklistCompany, type Company } from '@/app/actions/companies';
 import { saveDraftForCompany, loadDraftForCompany } from '@/app/actions/campaign-drafts';
 import { uploadResumeForCompany } from '@/app/actions/resumes';
+import { getCompanyOutreachHistory, type CompanyOutreachHistoryRow } from '@/app/actions/outreach-history';
 import { getStoredUser } from '@/lib/google-auth';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import * as Dialog from '@radix-ui/react-dialog';
@@ -40,13 +41,41 @@ function formatDate(iso: string | null): string {
   }
 }
 
+function getFollowUpStatusText(company: Company): string {
+  if (company.followup_count >= 5) {
+    return 'Follow-up lifecycle complete';
+  }
+
+  if (!company.next_followup_at) {
+    return 'Follow-up not scheduled';
+  }
+
+  const next = new Date(company.next_followup_at);
+  const now = new Date();
+  const diffMs = next.getTime() - now.getTime();
+  const diffDays = Math.ceil(diffMs / 86_400_000);
+
+  if (diffDays <= 0) {
+    return 'Follow-up Due';
+  }
+  if (diffDays === 1) {
+    return 'Follow-up available tomorrow';
+  }
+  return `Follow-up available in ${diffDays} days`;
+}
+
 function StatusBadge({ status }: { status: string | null }) {
   const s = (status ?? '').toLowerCase().trim();
   const config: Record<string, { label: string; className: string }> = {
     new: { label: 'New', className: 'bg-sky-500/15 text-sky-400 border-sky-500/20' },
     draft: { label: 'Draft', className: 'bg-amber-500/15 text-amber-400 border-amber-500/20' },
+    queued: { label: 'Queued', className: 'bg-blue-500/15 text-blue-400 border-blue-500/20' },
+    sending: { label: 'Sending', className: 'bg-cyan-500/15 text-cyan-400 border-cyan-500/20' },
     sent: { label: 'Sent', className: 'bg-violet-500/15 text-violet-400 border-violet-500/20' },
+    'partially sent': { label: 'Partially Sent', className: 'bg-fuchsia-500/15 text-fuchsia-400 border-fuchsia-500/20' },
+    'partially_sent': { label: 'Partially Sent', className: 'bg-fuchsia-500/15 text-fuchsia-400 border-fuchsia-500/20' },
     failed: { label: 'Failed', className: 'bg-red-500/15 text-red-400 border-red-500/20' },
+    completed: { label: 'Completed', className: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/20' },
     follow_up_due: { label: 'Follow-Up Due', className: 'bg-orange-500/15 text-orange-400 border-orange-500/20' },
     followup_due: { label: 'Follow-Up Due', className: 'bg-orange-500/15 text-orange-400 border-orange-500/20' },
     ready: { label: 'Ready', className: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/20' },
@@ -182,6 +211,77 @@ function BlacklistDialog({ company, open, onOpenChange, onConfirm, isPending }: 
                 </>
               )}
             </Button>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
+function HistoryDialog({
+  company,
+  open,
+  onOpenChange,
+  rows,
+  isLoading,
+}: {
+  company: Company | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  rows: CompanyOutreachHistoryRow[];
+  isLoading: boolean;
+}) {
+  if (!open || !company) {
+    return null;
+  }
+
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm" />
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-full max-w-3xl -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-white/[0.08] bg-zinc-900 p-6 shadow-2xl shadow-black/50 focus:outline-none">
+          <div className="mb-5">
+            <Dialog.Title className="text-lg font-semibold text-white">Send history for {company.company_name}</Dialog.Title>
+            <Dialog.Description className="mt-1 text-sm text-zinc-500">
+              Recipient-level send attempts and their current status.
+            </Dialog.Description>
+          </div>
+
+          {isLoading ? (
+            <div className="rounded-lg border border-white/[0.08] bg-white/[0.04] p-4 text-sm text-zinc-400">Loading history…</div>
+          ) : rows.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-white/[0.08] bg-white/[0.04] p-4 text-sm text-zinc-400">No send history has been recorded for this company yet.</div>
+          ) : (
+            <div className="max-h-[420px] overflow-auto rounded-lg border border-white/[0.08]">
+              <table className="min-w-full text-sm">
+                <thead className="bg-white/[0.04] text-left text-xs uppercase tracking-wider text-zinc-500">
+                  <tr>
+                    <th className="px-3 py-2">Recipient</th>
+                    <th className="px-3 py-2">Status</th>
+                    <th className="px-3 py-2">Message ID</th>
+                    <th className="px-3 py-2">Thread ID</th>
+                    <th className="px-3 py-2">Error</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/[0.06] bg-zinc-950/40">
+                  {rows.map((row, index) => (
+                    <tr key={`${row.campaignId}-${row.recipientEmail ?? 'unknown'}-${index}`} className="align-top">
+                      <td className="px-3 py-2 text-zinc-200">{row.recipientEmail || '—'}</td>
+                      <td className="px-3 py-2 text-zinc-300">{row.logStatus || row.campaignStatus || 'NEW'}</td>
+                      <td className="px-3 py-2 text-zinc-400">{row.gmailMessageId || '—'}</td>
+                      <td className="px-3 py-2 text-zinc-400">{row.gmailThreadId || '—'}</td>
+                      <td className="px-3 py-2 text-zinc-400">{row.errorMessage || '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <div className="mt-6 flex justify-end">
+            <Dialog.Close asChild>
+              <Button variant="outline" className="border-white/[0.08] bg-white/[0.04] text-zinc-300">Close</Button>
+            </Dialog.Close>
           </div>
         </Dialog.Content>
       </Dialog.Portal>
@@ -374,6 +474,10 @@ export function InternshipsTable() {
   const [composerOpen, setComposerOpen] = useState(false);
   const [savingDraft, setSavingDraft] = useState(false);
   const [sendingCompanyId, setSendingCompanyId] = useState<number | null>(null);
+  const [historyCompany, setHistoryCompany] = useState<Company | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyRows, setHistoryRows] = useState<CompanyOutreachHistoryRow[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [pendingCompanyId, setPendingCompanyId] = useState<number | null>(null);
 
@@ -422,10 +526,32 @@ export function InternshipsTable() {
     setComposerOpen(true);
   }, []);
 
+  const handleOpenHistory = useCallback(async (company: Company) => {
+    setHistoryCompany(company);
+    setHistoryOpen(true);
+    setHistoryLoading(true);
+    try {
+      const rows = await getCompanyOutreachHistory(company.id, currentUser?.accessToken);
+      setHistoryRows(rows);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to load send history.';
+      toast.error(message);
+      console.error('[history]', error);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [currentUser?.accessToken]);
+
   const handleSendClick = useCallback(async (company: Company) => {
     if (!currentUser?.accessToken || sendingCompanyId !== null) {
       return;
     }
+
+    const isFollowUpEligible = Boolean(
+      company.last_sent_at &&
+      company.followup_count < 5 &&
+      (!company.next_followup_at || new Date(company.next_followup_at) <= new Date())
+    );
 
     setSendingCompanyId(company.id);
     try {
@@ -435,7 +561,7 @@ export function InternshipsTable() {
           'Content-Type': 'application/json',
           'x-google-access-token': currentUser.accessToken,
         },
-        body: JSON.stringify({ campaignId: null, companyId: company.id }),
+        body: JSON.stringify({ campaignId: null, companyId: company.id, followUp: isFollowUpEligible }),
       });
 
       const result = await response.json().catch(() => ({}));
@@ -443,7 +569,7 @@ export function InternshipsTable() {
         throw new Error(result?.error || 'Failed to send email.');
       }
 
-      toast.success(`Email sent successfully to ${company.company_name}.`);
+      toast.success(isFollowUpEligible ? `Follow-up sent successfully to ${company.company_name}.` : `Email sent successfully to ${company.company_name}.`);
       queryClient.invalidateQueries({ queryKey: ['companies', currentUser?.email, currentUser?.userId] });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unexpected error.';
@@ -615,7 +741,19 @@ export function InternshipsTable() {
                       </td>
                       <td className="px-4 py-3.5 text-right">
                         <div className="flex items-center justify-end gap-2">
-                          {(company.status ?? '').toLowerCase().includes('follow') ? (
+                          <div className="mr-2 hidden text-right text-[11px] text-zinc-500 xl:block">
+                            {getFollowUpStatusText(company)}
+                          </div>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-8 border-white/[0.08] bg-white/[0.04] text-zinc-400 hover:bg-white/[0.08] hover:text-zinc-200"
+                            onClick={() => handleOpenHistory(company)}
+                          >
+                            History
+                          </Button>
+                          {(company.followup_count >= 5 || (company.last_sent_at && company.next_followup_at && new Date(company.next_followup_at) > new Date())) ? (
                             <Button
                               type="button"
                               variant="outline"
@@ -623,7 +761,7 @@ export function InternshipsTable() {
                               className="h-8 border-white/[0.08] bg-white/[0.04] text-zinc-400 hover:bg-white/[0.08] hover:text-zinc-200"
                               disabled
                             >
-                              Follow Up
+                              {company.followup_count >= 5 ? 'Follow Up Complete' : 'Follow Up'}
                             </Button>
                           ) : (
                             <Button
@@ -637,7 +775,7 @@ export function InternshipsTable() {
                               {sendingCompanyId === company.id ? (
                                 <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> Sending...</>
                               ) : (
-                                <><Send className="mr-1.5 h-3.5 w-3.5" /> Send</>
+                                <><Send className="mr-1.5 h-3.5 w-3.5" /> Follow Up</>
                               )}
                             </Button>
                           )}
@@ -689,6 +827,19 @@ export function InternshipsTable() {
         }}
         onConfirm={handleBlacklistConfirm}
         isPending={isBlacklisting}
+      />
+      <HistoryDialog
+        company={historyCompany}
+        open={historyOpen}
+        onOpenChange={(open) => {
+          setHistoryOpen(open);
+          if (!open) {
+            setHistoryCompany(null);
+            setHistoryRows([]);
+          }
+        }}
+        rows={historyRows}
+        isLoading={historyLoading}
       />
     </>
   );

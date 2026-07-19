@@ -62,6 +62,8 @@ export async function getDashboardStats(accessToken?: string | null) {
         `SELECT COUNT(*)::text AS count
          FROM outreach_campaigns
          WHERE user_id = $1
+           AND followup_count < 5
+           AND COALESCE(UPPER(status), '') <> 'COMPLETED'
            AND next_followup_at IS NOT NULL
            AND next_followup_at <= NOW()`,
         [authenticatedUser.id]

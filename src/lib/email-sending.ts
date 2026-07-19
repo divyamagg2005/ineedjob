@@ -12,6 +12,99 @@ export interface SendCampaignResult {
   recipient?: string | null;
 }
 
+function normalizeStatusValue(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim().toUpperCase();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function toDisplayStatus(status: string | null | undefined): string {
+  const normalized = normalizeStatusValue(status);
+  if (!normalized) {
+    return 'NEW';
+  }
+
+  switch (normalized) {
+    case 'PENDING':
+    case 'NEW':
+      return 'NEW';
+    case 'DRAFT':
+      return 'DRAFT';
+    case 'QUEUED':
+      return 'QUEUED';
+    case 'SENDING':
+      return 'SENDING';
+    case 'SENT':
+    case 'COMPLETED':
+      return 'SENT';
+    case 'PARTIALLY SENT':
+    case 'PARTIALLY_SENT':
+      return 'PARTIALLY SENT';
+    case 'FAILED':
+      return 'FAILED';
+    case 'FOLLOW-UP DUE':
+    case 'FOLLOW_UP_DUE':
+      return 'FOLLOW-UP DUE';
+    default:
+      return normalized;
+  }
+}
+
+function toSafeUserError(message: string | null | undefined): string {
+  if (!message) {
+    return 'We could not deliver this email. Please try again later.';
+  }
+
+  const normalized = message.toLowerCase();
+  if (normalized.includes('invalid google access token') || normalized.includes('authentication required')) {
+    return 'Your Google sign-in session expired. Please sign out and sign in again.';
+  }
+
+  if (normalized.includes('gmail') || normalized.includes('quota') || normalized.includes('rate limit')) {
+    return 'We could not send the email right now. Please try again later.';
+  }
+
+  return 'We could not deliver this email. Please try again later.';
+}
+
+async function upsertCampaignStatus({
+  campaignId,
+  userId,
+  status,
+  messageId,
+  threadId,
+  recipientEmail,
+  errorMessage,
+}: {
+  campaignId: number;
+  userId: string;
+  status: string;
+  messageId?: string | null;
+  threadId?: string | null;
+  recipientEmail?: string | null;
+  errorMessage?: string | null;
+}): Promise<void> {
+  await query(
+    `UPDATE outreach_campaigns
+     SET status = $1,
+         last_sent_at = CASE WHEN $1 = 'SENT' OR $1 = 'FAILED' THEN NOW() ELSE last_sent_at END,
+         updated_at = NOW()
+     WHERE id = $2 AND user_id = $3`,
+    [status, campaignId, userId]
+  );
+
+  if (messageId || threadId || recipientEmail || errorMessage) {
+    await query(
+      `INSERT INTO email_logs (campaign_id, gmail_message_id, gmail_thread_id, send_type, status, error_message, sent_at)
+       VALUES ($1, $2, $3, 'INITIAL', $4, $5, NOW())`,
+      [campaignId, messageId ?? null, threadId ?? null, status, errorMessage ?? null]
+    );
+  }
+}
+
 interface CampaignRow {
   id: number;
   user_id: string;
@@ -21,6 +114,9 @@ interface CampaignRow {
   email_body: string | null;
   resume_url: string | null;
   status: string | null;
+  followup_count: number | null;
+  last_sent_at: string | null;
+  next_followup_at: string | null;
 }
 
 function normalizeText(value: string | null | undefined): string | null {
@@ -91,6 +187,69 @@ function createMimeMessage({
   ];
 
   return lines.join('\r\n');
+}
+
+function buildFollowUpBody({
+  originalBody,
+  followUpNumber,
+}: {
+  originalBody: string;
+  followUpNumber: number;
+}): string {
+  const body = normalizeText(originalBody) ?? '';
+  const prefix = `Hi there,\n\nI'm following up on my previous outreach message. This is follow-up ${followUpNumber} of 5.\n\n`;
+  return `${prefix}${body}`.trim();
+}
+
+function buildFollowUpSubject({
+  originalSubject,
+  followUpNumber,
+}: {
+  originalSubject: string;
+  followUpNumber: number;
+}): string {
+  const subject = normalizeText(originalSubject) ?? 'Following up on my previous message';
+  return `Follow-up ${followUpNumber}: ${subject}`;
+}
+
+function getFollowUpSendType(followUpNumber: number): string {
+  switch (followUpNumber) {
+    case 1:
+      return 'FOLLOWUP_1';
+    case 2:
+      return 'FOLLOWUP_2';
+    case 3:
+      return 'FOLLOWUP_3';
+    case 4:
+      return 'FOLLOWUP_4';
+    default:
+      return 'FOLLOWUP_5';
+  }
+}
+
+function getFollowUpEligibility(campaign: CampaignRow): {
+  eligible: boolean;
+  due: boolean;
+  followUpNumber: number;
+  reason: string;
+} {
+  const followUpCount = Number(campaign.followup_count ?? 0);
+  if (followUpCount >= 5) {
+    return { eligible: false, due: false, followUpNumber: 5, reason: 'The follow-up lifecycle for this recipient is already complete.' };
+  }
+
+  if (!campaign.last_sent_at) {
+    return { eligible: false, due: false, followUpNumber: followUpCount + 1, reason: 'The initial email has not been sent yet.' };
+  }
+
+  const nextFollowUpAt = campaign.next_followup_at ? new Date(campaign.next_followup_at) : null;
+  const isDue = Boolean(nextFollowUpAt && nextFollowUpAt <= new Date());
+  if (!isDue) {
+    const nextLabel = nextFollowUpAt ? nextFollowUpAt.toISOString() : 'unknown';
+    return { eligible: false, due: false, followUpNumber: followUpCount + 1, reason: `Follow-up is not due yet. Next follow-up is scheduled for ${nextLabel}.` };
+  }
+
+  return { eligible: true, due: true, followUpNumber: followUpCount + 1, reason: 'Follow-up is ready to send.' };
 }
 
 async function resolveRecipientEmail(campaign: CampaignRow): Promise<{ recipientEmail: string; recruiterEmailId: number | null }> {
@@ -293,7 +452,7 @@ export async function sendInitialCampaignEmailToRecipient({
       status,
       created_at,
       updated_at
-    ) VALUES ($1, $2, $3, $4, $5, $6, 'SENDING', NOW(), NOW())
+    ) VALUES ($1, $2, $3, $4, $5, $6, 'QUEUED', NOW(), NOW())
      RETURNING id`,
     [authenticatedUser.id, companyId ?? null, recruiterEmailId ?? null, normalizedSubject, normalizedBody, normalizedResumeUrl]
   );
@@ -392,12 +551,12 @@ export async function sendInitialCampaignEmailToRecipient({
     await query(
       `INSERT INTO email_logs (campaign_id, gmail_message_id, gmail_thread_id, send_type, status, error_message, sent_at)
        VALUES ($1, NULL, NULL, 'INITIAL', 'FAILED', $2, NOW())`,
-      [campaignId, message]
+      [campaignId, toSafeUserError(message)]
     );
 
     return {
       success: false,
-      error: message,
+      error: toSafeUserError(message),
       status: 'FAILED',
       campaignId,
       recipient: resolvedRecipientEmail,
@@ -431,12 +590,12 @@ export async function sendInitialCampaignEmail({
     throw new Error('Campaign not found or access denied.');
   }
 
-  const normalizedStatus = campaign.status?.trim().toUpperCase();
-  if (normalizedStatus === 'SENT') {
+  const normalizedStatus = normalizeStatusValue(campaign.status);
+  if (normalizedStatus === 'SENT' || normalizedStatus === 'COMPLETED' || normalizedStatus === 'PARTIALLY SENT') {
     throw new Error('This campaign has already been sent.');
   }
 
-  if (normalizedStatus === 'SENDING') {
+  if (normalizedStatus === 'SENDING' || normalizedStatus === 'QUEUED') {
     throw new Error('A send request is already in progress for this campaign.');
   }
 
@@ -512,6 +671,8 @@ export async function sendInitialCampaignEmail({
          status = 'SENT',
          sent_at = NOW(),
          last_sent_at = NOW(),
+         followup_count = 0,
+         next_followup_at = NOW() + INTERVAL '7 days',
          updated_at = NOW()
      WHERE id = $2 AND user_id = $3`,
     [recruiterEmailId ?? campaign.recruiter_email_id, campaign.id, authenticatedUser.id]
@@ -531,6 +692,196 @@ export async function sendInitialCampaignEmail({
     threadId,
     recipient: recipientEmail,
   };
+}
+
+export async function sendFollowUpCampaignEmail({
+  campaignId,
+  companyId,
+  accessToken,
+}: {
+  campaignId?: number | null;
+  companyId?: number | null;
+  accessToken?: string | null;
+}): Promise<SendCampaignResult> {
+  const authenticatedUser = await getAuthenticatedUserContext(undefined, undefined, accessToken);
+
+  const campaignQuery = await query<CampaignRow>(
+    `SELECT id, user_id, company_id, recruiter_email_id, email_subject, email_body, resume_url, status, followup_count, last_sent_at, next_followup_at
+     FROM outreach_campaigns
+     WHERE user_id = $1
+       AND (($2::bigint IS NOT NULL AND id = $2) OR ($3::bigint IS NOT NULL AND company_id = $3))
+     ORDER BY created_at DESC, id DESC
+     LIMIT 1`,
+    [authenticatedUser.id, campaignId ?? null, companyId ?? null]
+  );
+
+  const campaign = campaignQuery.rows[0];
+  if (!campaign) {
+    throw new Error('Campaign not found or access denied.');
+  }
+
+  const eligibility = getFollowUpEligibility(campaign);
+  if (!eligibility.eligible) {
+    throw new Error(eligibility.reason);
+  }
+
+  const normalizedStatus = normalizeStatusValue(campaign.status);
+  if (normalizedStatus === 'SENDING' || normalizedStatus === 'QUEUED') {
+    throw new Error('A send request is already in progress for this campaign.');
+  }
+
+  await query(
+    `UPDATE outreach_campaigns
+     SET status = 'SENDING', updated_at = NOW()
+     WHERE id = $1 AND user_id = $2`,
+    [campaign.id, authenticatedUser.id]
+  );
+
+  const subject = normalizeText(campaign.email_subject);
+  const body = normalizeText(campaign.email_body);
+  const resumeKey = normalizeText(campaign.resume_url);
+
+  if (!subject) {
+    throw new Error('This campaign is missing a subject.');
+  }
+
+  if (!body) {
+    throw new Error('This campaign is missing an email body.');
+  }
+
+  const { recipientEmail, recruiterEmailId } = await resolveRecipientEmail(campaign);
+
+  let attachmentBuffer: Buffer;
+  try {
+    attachmentBuffer = await getResumeBufferFromS3(resumeKey ?? '');
+  } catch (error) {
+    throw new Error(error instanceof Error ? error.message : 'Unable to fetch the attached resume.');
+  }
+
+  const senderEmail = authenticatedUser.email;
+  const attachmentName = (resumeKey ?? '').split('/').pop() || 'resume.pdf';
+  const followUpSubject = buildFollowUpSubject({ originalSubject: subject, followUpNumber: eligibility.followUpNumber });
+  const followUpBody = buildFollowUpBody({ originalBody: body, followUpNumber: eligibility.followUpNumber });
+  const mimeMessage = createMimeMessage({
+    recipient: recipientEmail,
+    subject: followUpSubject,
+    body: followUpBody,
+    attachmentBuffer,
+    attachmentName,
+    senderEmail,
+  });
+
+  const encodedMessage = Buffer.from(mimeMessage, 'utf8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+
+  const lastThreadResult = await query<{ gmail_thread_id: string | null }>(
+    `SELECT gmail_thread_id
+     FROM email_logs
+     WHERE campaign_id = $1 AND gmail_thread_id IS NOT NULL
+     ORDER BY sent_at DESC, id DESC
+     LIMIT 1`,
+    [campaign.id]
+  );
+
+  const threadId = lastThreadResult.rows[0]?.gmail_thread_id ?? null;
+  const requestBody = threadId ? { raw: encodedMessage, threadId } : { raw: encodedMessage };
+
+  const gmailResponse = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(requestBody),
+  });
+
+  const gmailPayload = await gmailResponse.json().catch(() => ({}));
+
+  if (!gmailResponse.ok) {
+    const errorMessage = typeof gmailPayload?.error?.message === 'string'
+      ? gmailPayload.error.message
+      : 'Gmail rejected the message.';
+    throw new Error(errorMessage);
+  }
+
+  const messageId = typeof gmailPayload?.id === 'string' ? gmailPayload.id : null;
+  const receivedThreadId = typeof gmailPayload?.threadId === 'string' ? gmailPayload.threadId : threadId;
+  const nextFollowUpCount = (campaign.followup_count ?? 0) + 1;
+
+  await query(
+    `UPDATE outreach_campaigns
+     SET recruiter_email_id = $1,
+         followup_count = $2,
+         last_sent_at = NOW(),
+         next_followup_at = CASE WHEN $2 < 5 THEN NOW() + INTERVAL '7 days' ELSE NULL END,
+         status = CASE WHEN $2 >= 5 THEN 'COMPLETED' ELSE 'SENT' END,
+         updated_at = NOW()
+     WHERE id = $3 AND user_id = $4`,
+    [recruiterEmailId ?? campaign.recruiter_email_id, nextFollowUpCount, campaign.id, authenticatedUser.id]
+  );
+
+  await query(
+    `INSERT INTO email_logs (campaign_id, gmail_message_id, gmail_thread_id, send_type, status, error_message, sent_at)
+     VALUES ($1, $2, $3, $4, 'SENT', NULL, NOW())`,
+    [campaign.id, messageId, receivedThreadId, getFollowUpSendType(eligibility.followUpNumber)]
+  );
+
+  return {
+    success: true,
+    status: nextFollowUpCount >= 5 ? 'COMPLETED' : 'SENT',
+    campaignId: campaign.id,
+    messageId,
+    threadId: receivedThreadId,
+    recipient: recipientEmail,
+  };
+}
+
+export async function sendFollowUpCampaignEmailWithErrorHandling({
+  campaignId,
+  companyId,
+  accessToken,
+}: {
+  campaignId?: number | null;
+  companyId?: number | null;
+  accessToken?: string | null;
+}): Promise<SendCampaignResult> {
+  try {
+    return await sendFollowUpCampaignEmail({ campaignId, companyId, accessToken });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unable to send follow-up email.';
+    const typedError = error as Error & { status?: number };
+    const authError = error instanceof AuthError;
+    const statusCode = authError ? typedError.status ?? 401 : 500;
+
+    try {
+      const authenticatedUser = await getAuthenticatedUserContext(undefined, undefined, accessToken);
+      const campaign = await query<{ id: number }>(
+        `SELECT id FROM outreach_campaigns WHERE id = $1 AND user_id = $2 LIMIT 1`,
+        [campaignId, authenticatedUser.id]
+      );
+
+      if (campaign.rows[0]?.id) {
+        await query(
+          `UPDATE outreach_campaigns SET status = 'FAILED', updated_at = NOW() WHERE id = $1 AND user_id = $2`,
+          [campaign.rows[0].id, authenticatedUser.id]
+        );
+
+        await query(
+          `INSERT INTO email_logs (campaign_id, gmail_message_id, gmail_thread_id, send_type, status, error_message, sent_at)
+           VALUES ($1, NULL, NULL, 'FAILED', 'FAILED', $2, NOW())`,
+          [campaign.rows[0].id, toSafeUserError(message)]
+        );
+      }
+    } catch (logError) {
+      console.error('Failed to log follow-up send error:', logError);
+    }
+
+    return {
+      success: false,
+      error: toSafeUserError(message),
+      status: 'FAILED',
+      campaignId: campaignId ?? undefined,
+    };
+  }
 }
 
 export async function sendInitialCampaignEmailWithErrorHandling({
@@ -575,7 +926,7 @@ export async function sendInitialCampaignEmailWithErrorHandling({
 
     return {
       success: false,
-      error: message,
+      error: toSafeUserError(message),
       status: 'FAILED',
       campaignId: campaignId ?? undefined,
     };

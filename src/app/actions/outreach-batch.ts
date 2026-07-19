@@ -31,12 +31,14 @@ export async function loadCompanyRecipients(companyName: string, accessToken?: s
     const authenticatedUser = await getAuthenticatedUserContext(undefined, undefined, accessToken);
 
     const company = await query<{ id: number | null; company_name: string | null }>(
-      `SELECT id, company_name
-       FROM companies
-       WHERE lower(company_name) = lower($1)
-       ORDER BY created_at DESC, id DESC
+      `SELECT c.id, c.company_name
+       FROM companies c
+       JOIN outreach_campaigns oc ON oc.company_id = c.id
+       WHERE oc.user_id = $1
+         AND lower(c.company_name) = lower($2)
+       ORDER BY c.created_at DESC, c.id DESC
        LIMIT 1`,
-      [companyName]
+      [authenticatedUser.id, companyName]
     );
 
     const companyId = company.rows[0]?.id ?? null;
