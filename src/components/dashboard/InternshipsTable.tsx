@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { fetchCompanies, blacklistCompany, type Company } from '@/app/actions/companies';
+import { getStoredUser } from '@/lib/google-auth';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import * as Dialog from '@radix-ui/react-dialog';
 
@@ -206,18 +207,20 @@ export function InternshipsTable() {
   const [blacklistTarget, setBlacklistTarget] = useState<Company | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
 
+  const currentUser = getStoredUser();
+
   const { data: companies = [], isLoading, isError, error, refetch, isFetching } = useQuery({
-    queryKey: ['companies'],
-    queryFn: fetchCompanies,
+    queryKey: ['companies', currentUser?.email, currentUser?.userId],
+    queryFn: () => fetchCompanies(currentUser?.accessToken),
   });
 
   const { mutate: doBlacklist, isPending: isBlacklisting } = useMutation({
-    mutationFn: (company: Company) => blacklistCompany(company.id, company.company_name),
+    mutationFn: (company: Company) => blacklistCompany(company.id, company.company_name, currentUser?.accessToken),
     onSuccess: () => {
       toast.success('Company blacklisted successfully.');
       setDialogOpen(false);
       setBlacklistTarget(null);
-      queryClient.invalidateQueries({ queryKey: ['companies'] });
+      queryClient.invalidateQueries({ queryKey: ['companies', currentUser?.email, currentUser?.userId] });
     },
     onError: (err) => {
       const msg = (err as Error)?.message ?? 'Unknown error';

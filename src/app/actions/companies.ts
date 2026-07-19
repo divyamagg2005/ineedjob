@@ -1,6 +1,7 @@
 'use server'
 
 import { query } from '@/lib/db';
+import { AuthError, getAuthenticatedUserContext } from '@/lib/user-context';
 
 export type Company = {
   id: number;
@@ -10,8 +11,10 @@ export type Company = {
   email_count: number;
 };
 
-export async function fetchCompanies(): Promise<Company[]> {
+export async function fetchCompanies(accessToken?: string | null): Promise<Company[]> {
   try {
+    await getAuthenticatedUserContext(undefined, undefined, accessToken);
+
     // Fetch companies with a count of related company_emails rows
     const result = await query<{
       id: number;
@@ -42,8 +45,10 @@ export async function fetchCompanies(): Promise<Company[]> {
   }
 }
 
-export async function blacklistCompany(companyId: number, companyName: string): Promise<void> {
+export async function blacklistCompany(companyId: number, companyName: string, accessToken?: string | null): Promise<void> {
   try {
+    await getAuthenticatedUserContext(undefined, undefined, accessToken);
+
     // Call the stored procedure to blacklist the company
     await query(
       `SELECT blacklist_company($1, $2)`,

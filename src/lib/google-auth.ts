@@ -8,6 +8,7 @@ export interface GoogleUser {
   picture: string;
   accessToken: string;
   refreshToken?: string;
+  userId?: string;
 }
 
 const STORAGE_KEY = 'google_auth_user';

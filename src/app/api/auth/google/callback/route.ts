@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { resolveAuthenticatedUserFromTrustedEmail } from '@/lib/user-context';
 
 export async function GET(request: NextRequest) {
   const code = request.nextUrl.searchParams.get('code');
@@ -43,13 +44,16 @@ export async function GET(request: NextRequest) {
 
     const userInfo = await userInfoRes.json();
 
+    const authenticatedUser = await resolveAuthenticatedUserFromTrustedEmail(userInfo.email);
+
     // Build a simple user object to store in localStorage via the client
     const userData = {
-      email: userInfo.email,
+      email: authenticatedUser.email,
       name: userInfo.name,
       picture: userInfo.picture,
       accessToken: tokens.access_token,
       refreshToken: tokens.refresh_token || '',
+      userId: authenticatedUser.id,
     };
 
     // Redirect back to home page with user data as a query param

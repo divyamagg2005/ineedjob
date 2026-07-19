@@ -60,7 +60,7 @@ export function SendOutreach({ resumeFileName, emailSubject, emailBody }: SendOu
 
       // 2. Log it into PostgreSQL `applications` table
       const dbResult = await insertApplication({
-        user_email: user.email,
+        accessToken: user.accessToken,
         company_name: companyName,
         recipient_email: recipientEmail,
         resume_file: resumeFileName || null
