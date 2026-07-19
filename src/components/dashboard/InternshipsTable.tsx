@@ -373,6 +373,7 @@ export function InternshipsTable() {
   const [composerCompany, setComposerCompany] = useState<Company | null>(null);
   const [composerOpen, setComposerOpen] = useState(false);
   const [savingDraft, setSavingDraft] = useState(false);
+  const [sendingCompanyId, setSendingCompanyId] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [pendingCompanyId, setPendingCompanyId] = useState<number | null>(null);
 
@@ -420,6 +421,38 @@ export function InternshipsTable() {
     setComposerCompany(company);
     setComposerOpen(true);
   }, []);
+
+  const handleSendClick = useCallback(async (company: Company) => {
+    if (!currentUser?.accessToken || sendingCompanyId !== null) {
+      return;
+    }
+
+    setSendingCompanyId(company.id);
+    try {
+      const response = await fetch('/api/outreach/send', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-google-access-token': currentUser.accessToken,
+        },
+        body: JSON.stringify({ campaignId: null, companyId: company.id }),
+      });
+
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(result?.error || 'Failed to send email.');
+      }
+
+      toast.success(`Email sent successfully to ${company.company_name}.`);
+      queryClient.invalidateQueries({ queryKey: ['companies', currentUser?.email, currentUser?.userId] });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unexpected error.';
+      toast.error(message);
+      console.error('[send-mail]', error);
+    } finally {
+      setSendingCompanyId(null);
+    }
+  }, [currentUser?.accessToken, currentUser?.email, currentUser?.userId, queryClient, sendingCompanyId]);
 
   const handleResumeSelection = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = event.target.files?.[0];
@@ -598,9 +631,14 @@ export function InternshipsTable() {
                               variant="outline"
                               size="sm"
                               className="h-8 border-violet-500/20 bg-violet-500/10 text-violet-300 hover:bg-violet-500/20"
+                              onClick={() => handleSendClick(company)}
+                              disabled={sendingCompanyId === company.id}
                             >
-                              <Send className="mr-1.5 h-3.5 w-3.5" />
-                              Send
+                              {sendingCompanyId === company.id ? (
+                                <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> Sending...</>
+                              ) : (
+                                <><Send className="mr-1.5 h-3.5 w-3.5" /> Send</>
+                              )}
                             </Button>
                           )}
                           <ActionsMenu company={company} onBlacklist={handleBlacklistRequest} />
