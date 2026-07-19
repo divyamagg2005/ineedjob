@@ -315,13 +315,15 @@ interface DraftComposerProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSaved: () => void;
+  onSent: () => void;
 }
 
-function DraftComposer({ company, open, onOpenChange, onSaved }: DraftComposerProps) {
+function DraftComposer({ company, open, onOpenChange, onSaved, onSent }: DraftComposerProps) {
   const [subject, setSubject] = useState('');
   const [body, setBody] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isSending, setIsSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasLoaded, setHasLoaded] = useState(false);
 
@@ -390,6 +392,56 @@ function DraftComposer({ company, open, onOpenChange, onSaved }: DraftComposerPr
     }
   };
 
+  const handleSend = async () => {
+    if (!company || isSending || isSaving || isLoading) return;
+
+    const trimmedSubject = subject.trim();
+    const trimmedBody = body.trim();
+
+    if (!trimmedSubject || !trimmedBody) {
+      setError('Please enter both a subject and email body before sending.');
+      return;
+    }
+
+    if (!currentUser?.accessToken) {
+      setError('You must be signed in to send emails.');
+      return;
+    }
+
+    setIsSending(true);
+    setError(null);
+    try {
+      // Save draft first to persist subject/body
+      const saveResult = await saveDraftForCompany({ companyId: company.id, subject: trimmedSubject, body: trimmedBody }, currentUser.accessToken);
+      if (!saveResult.success) {
+        throw new Error(saveResult.error ?? 'Unable to save draft before sending.');
+      }
+
+      // Now send via the API route
+      const response = await fetch('/api/outreach/send', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-google-access-token': currentUser.accessToken,
+        },
+        body: JSON.stringify({ companyId: company.id, followUp: false }),
+      });
+
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(result?.error ?? 'Failed to send email.');
+      }
+
+      toast.success(`Email sent to ${company.company_name}.`);
+      onSent();
+      onOpenChange(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to send email.');
+    } finally {
+      setIsSending(false);
+    }
+  };
+
   const handleDialogOpenChange = (nextOpen: boolean) => {
     if (!nextOpen) {
       resetDraftForm();
@@ -451,11 +503,14 @@ function DraftComposer({ company, open, onOpenChange, onSaved }: DraftComposerPr
           </div>
 
           <div className="mt-6 flex justify-end gap-3">
-            <Button variant="outline" className="border-white/[0.08] bg-white/[0.04] text-zinc-300" onClick={() => handleDialogOpenChange(false)} disabled={isSaving || isLoading}>
+            <Button variant="outline" className="border-white/[0.08] bg-white/[0.04] text-zinc-300" onClick={() => handleDialogOpenChange(false)} disabled={isSaving || isSending || isLoading}>
               Cancel
             </Button>
-            <Button className="bg-violet-600 hover:bg-violet-700" onClick={handleSave} disabled={isSaving || isLoading}>
+            <Button variant="outline" className="border-white/[0.08] bg-white/[0.04] text-zinc-300 hover:bg-white/[0.08]" onClick={handleSave} disabled={isSaving || isSending || isLoading}>
               {isSaving ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Saving...</> : 'Save Draft'}
+            </Button>
+            <Button className="bg-violet-600 hover:bg-violet-700 shadow-lg shadow-violet-900/30" onClick={handleSend} disabled={isSaving || isSending || isLoading}>
+              {isSending ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Sending...</> : <><Send className="mr-2 h-4 w-4" /> Send Email</>}
             </Button>
           </div>
         </Dialog.Content>
@@ -889,6 +944,10 @@ export function InternshipsTable() {
         onSaved={() => {
           setSavingDraft(false);
           queryClient.invalidateQueries({ queryKey: ['companies', currentUser?.email, currentUser?.userId] });
+        }}
+        onSent={() => {
+          queryClient.invalidateQueries({ queryKey: ['companies', currentUser?.email, currentUser?.userId] });
+          queryClient.invalidateQueries({ queryKey: ['dashboardStats'] });
         }}
       />
       <BlacklistDialog
