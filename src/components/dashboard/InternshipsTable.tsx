@@ -319,8 +319,16 @@ interface DraftComposerProps {
   onSent: () => void;
 }
 
-// Step 1: compose  Step 2: pick recipient and confirm send
 type ComposerStep = 'compose' | 'pick-recipient';
+
+// Delay between individual sends when multiple recipients selected (ms)
+const MULTI_SEND_DELAY_MS = 8000; // 8 seconds — looks human, avoids spam flags
+
+interface SendProgress {
+  email: string;
+  status: 'pending' | 'sending' | 'sent' | 'failed';
+  error?: string;
+}
 
 function DraftComposer({ company, open, onOpenChange, onSaved, onSent }: DraftComposerProps) {
   const [subject, setSubject] = useState('');
@@ -332,8 +340,10 @@ function DraftComposer({ company, open, onOpenChange, onSaved, onSent }: DraftCo
   const [hasLoaded, setHasLoaded] = useState(false);
   const [step, setStep] = useState<ComposerStep>('compose');
   const [recipients, setRecipients] = useState<{ email: string; source: string | null; verified: boolean | null }[]>([]);
-  const [selectedRecipient, setSelectedRecipient] = useState<string>('');
+  const [selectedEmails, setSelectedEmails] = useState<Set<string>>(new Set());
   const [isLoadingRecipients, setIsLoadingRecipients] = useState(false);
+  const [sendProgress, setSendProgress] = useState<SendProgress[]>([]);
+  const [sendComplete, setSendComplete] = useState(false);
 
   const currentUser = getStoredUser();
 
@@ -344,7 +354,9 @@ function DraftComposer({ company, open, onOpenChange, onSaved, onSent }: DraftCo
     setHasLoaded(false);
     setStep('compose');
     setRecipients([]);
-    setSelectedRecipient('');
+    setSelectedEmails(new Set());
+    setSendProgress([]);
+    setSendComplete(false);
   }, []);
 
   React.useEffect(() => {
@@ -393,7 +405,6 @@ function DraftComposer({ company, open, onOpenChange, onSaved, onSent }: DraftCo
     }
   };
 
-  // Step 1 → Step 2: validate compose fields, save draft, load recipients
   const handleProceedToRecipient = async () => {
     if (!company || isSaving || isLoading) return;
     const trimmedSubject = subject.trim();
@@ -418,7 +429,6 @@ function DraftComposer({ company, open, onOpenChange, onSaved, onSent }: DraftCo
     }
     setIsSaving(false);
 
-    // Load recipients for this company
     setIsLoadingRecipients(true);
     try {
       const result = await loadCompanyRecipients(company.company_name, currentUser.accessToken);
@@ -427,7 +437,6 @@ function DraftComposer({ company, open, onOpenChange, onSaved, onSent }: DraftCo
         source: r.source ?? null,
         verified: r.verified ?? null,
       }));
-      // Deduplicate by email (same address can appear in both company_emails and recruiter_emails)
       const seen = new Set<string>();
       const deduped = list.filter((r) => {
         const key = r.email.toLowerCase();
@@ -436,7 +445,10 @@ function DraftComposer({ company, open, onOpenChange, onSaved, onSent }: DraftCo
         return true;
       });
       setRecipients(deduped);
-      setSelectedRecipient(list[0]?.email ?? '');
+      // Pre-select first by default
+      if (deduped.length > 0) {
+        setSelectedEmails(new Set([deduped[0].email]));
+      }
       setStep('pick-recipient');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to load recipients.');
@@ -445,42 +457,96 @@ function DraftComposer({ company, open, onOpenChange, onSaved, onSent }: DraftCo
     }
   };
 
-  // Step 2: actually send to selected recipient
+  const toggleEmail = (email: string) => {
+    setSelectedEmails((prev) => {
+      const next = new Set(prev);
+      if (next.has(email)) {
+        next.delete(email);
+      } else {
+        next.add(email);
+      }
+      return next;
+    });
+  };
+
+  const toggleAll = () => {
+    if (selectedEmails.size === recipients.length) {
+      setSelectedEmails(new Set());
+    } else {
+      setSelectedEmails(new Set(recipients.map((r) => r.email)));
+    }
+  };
+
   const handleConfirmSend = async () => {
     if (!company || !currentUser?.accessToken || isSending) return;
-    if (!selectedRecipient) {
-      setError('Please select a recipient.');
+    if (selectedEmails.size === 0) {
+      setError('Please select at least one recipient.');
       return;
     }
+
+    const toSend = recipients.filter((r) => selectedEmails.has(r.email));
+    const isBatch = toSend.length > 1;
+
+    // Initialise progress
+    setSendProgress(toSend.map((r) => ({ email: r.email, status: 'pending' })));
     setIsSending(true);
     setError(null);
-    try {
-      const response = await fetch('/api/outreach/send', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-google-access-token': currentUser.accessToken,
-        },
-        body: JSON.stringify({ companyId: company.id, recipientEmail: selectedRecipient, followUp: false }),
-      });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result?.error ?? 'Failed to send email.');
-      toast.success(`Email sent to ${selectedRecipient}.`);
+
+    let sentCount = 0;
+
+    for (let i = 0; i < toSend.length; i++) {
+      const recipient = toSend[i];
+
+      // Mark as sending
+      setSendProgress((prev) => prev.map((p) => p.email === recipient.email ? { ...p, status: 'sending' } : p));
+
+      try {
+        const response = await fetch('/api/outreach/send', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-google-access-token': currentUser.accessToken,
+          },
+          body: JSON.stringify({ companyId: company.id, recipientEmail: recipient.email, followUp: false }),
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(result?.error ?? 'Failed to send email.');
+
+        setSendProgress((prev) => prev.map((p) => p.email === recipient.email ? { ...p, status: 'sent' } : p));
+        sentCount++;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Failed to send.';
+        setSendProgress((prev) => prev.map((p) => p.email === recipient.email ? { ...p, status: 'failed', error: msg } : p));
+      }
+
+      // Delay between sends (skip after last one)
+      if (isBatch && i < toSend.length - 1) {
+        await new Promise((resolve) => setTimeout(resolve, MULTI_SEND_DELAY_MS));
+      }
+    }
+
+    setIsSending(false);
+    setSendComplete(true);
+
+    if (sentCount > 0) {
+      toast.success(sentCount === 1
+        ? `Email sent to ${toSend[0].email}.`
+        : `${sentCount} of ${toSend.length} emails sent to ${company.company_name}.`
+      );
       onSent();
-      onOpenChange(false);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to send email.');
-    } finally {
-      setIsSending(false);
     }
   };
 
   const handleDialogOpenChange = (nextOpen: boolean) => {
+    if (isSending) return; // block closing while sending
     if (!nextOpen) resetDraftForm();
     onOpenChange(nextOpen);
   };
 
   if (!open || !company) return null;
+
+  const allSelected = recipients.length > 0 && selectedEmails.size === recipients.length;
+  const someSelected = selectedEmails.size > 0 && !allSelected;
 
   return (
     <Dialog.Root open={open} onOpenChange={handleDialogOpenChange}>
@@ -492,16 +558,18 @@ function DraftComposer({ company, open, onOpenChange, onSaved, onSent }: DraftCo
           <div className="mb-5 flex items-start justify-between gap-4">
             <div>
               <Dialog.Title className="text-lg font-semibold text-white">
-                {step === 'compose' ? 'Email Draft' : 'Select Recipient'}
+                {step === 'compose' ? 'Email Draft' : sendComplete ? 'Send Complete' : 'Select Recipients'}
               </Dialog.Title>
               <p className="mt-1 text-sm text-zinc-500">
                 {step === 'compose'
                   ? `Compose a draft for ${company.company_name}.`
-                  : `Choose who to send this email to at ${company.company_name}.`}
+                  : sendComplete
+                    ? `Finished sending to ${company.company_name}.`
+                    : `Choose one or more recipients at ${company.company_name}. Emails are sent individually with a delay.`}
               </p>
             </div>
             <div className="flex items-center gap-2">
-              {step === 'pick-recipient' && (
+              {step === 'pick-recipient' && !isSending && !sendComplete && (
                 <button
                   onClick={() => { setStep('compose'); setError(null); }}
                   className="rounded-lg border border-white/[0.08] bg-white/[0.04] px-2.5 py-1 text-xs font-medium text-zinc-400 hover:bg-white/[0.08] transition-colors"
@@ -552,7 +620,7 @@ function DraftComposer({ company, open, onOpenChange, onSaved, onSent }: DraftCo
             </div>
           )}
 
-          {/* Step 2: Pick recipient */}
+          {/* Step 2: Pick recipients or show progress */}
           {step === 'pick-recipient' && (
             <div className="space-y-3">
               {isLoadingRecipients ? (
@@ -565,65 +633,127 @@ function DraftComposer({ company, open, onOpenChange, onSaved, onSent }: DraftCo
                 </div>
               ) : (
                 <>
-                  <p className="text-xs text-zinc-500 mb-3">
-                    {recipients.length} recipient{recipients.length !== 1 ? 's' : ''} found — select one to send to.
-                  </p>
-                  <div className="max-h-[320px] overflow-y-auto space-y-2 pr-1">
-                    {recipients.map((r, i) => (
-                      <button
-                        key={`${r.email}-${i}`}
-                        type="button"
-                        onClick={() => setSelectedRecipient(r.email)}
-                        className={`w-full flex items-center justify-between rounded-lg border px-4 py-3 text-left text-sm transition-colors ${
-                          selectedRecipient === r.email
-                            ? 'border-violet-500/40 bg-violet-500/10 text-violet-200'
-                            : 'border-white/[0.08] bg-white/[0.03] text-zinc-300 hover:bg-white/[0.06]'
-                        }`}
-                      >
-                        <div className="flex items-center gap-3">
-                          <div className={`h-4 w-4 rounded-full border-2 shrink-0 flex items-center justify-center ${
-                            selectedRecipient === r.email ? 'border-violet-500 bg-violet-500' : 'border-zinc-600'
+                  {/* Sending progress view */}
+                  {(isSending || sendComplete) && sendProgress.length > 0 ? (
+                    <div className="space-y-2">
+                      <p className="text-xs text-zinc-500 mb-1">
+                        {isSending
+                          ? `Sending ${sendProgress.filter(p => p.status === 'sent' || p.status === 'sending').length} of ${sendProgress.length}… Please keep this dialog open.`
+                          : `Done — ${sendProgress.filter(p => p.status === 'sent').length} sent, ${sendProgress.filter(p => p.status === 'failed').length} failed.`}
+                      </p>
+                      {isSending && selectedEmails.size > 1 && (
+                        <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
+                          Sending with {MULTI_SEND_DELAY_MS / 1000}s delay between emails to avoid spam detection.
+                        </div>
+                      )}
+                      <div className="max-h-[280px] overflow-y-auto space-y-2 pr-1">
+                        {sendProgress.map((p) => (
+                          <div key={p.email} className={`flex items-center justify-between rounded-lg border px-4 py-3 text-sm ${
+                            p.status === 'sent' ? 'border-emerald-500/20 bg-emerald-500/10' :
+                            p.status === 'failed' ? 'border-red-500/20 bg-red-500/10' :
+                            p.status === 'sending' ? 'border-violet-500/30 bg-violet-500/10' :
+                            'border-white/[0.08] bg-white/[0.03]'
                           }`}>
-                            {selectedRecipient === r.email && (
-                              <div className="h-1.5 w-1.5 rounded-full bg-white" />
-                            )}
+                            <span className={`font-medium truncate ${
+                              p.status === 'sent' ? 'text-emerald-300' :
+                              p.status === 'failed' ? 'text-red-300' :
+                              p.status === 'sending' ? 'text-violet-300' : 'text-zinc-400'
+                            }`}>{p.email}</span>
+                            <div className="flex items-center gap-2 shrink-0 ml-3">
+                              {p.status === 'pending' && <span className="text-xs text-zinc-500">Waiting…</span>}
+                              {p.status === 'sending' && <><Loader2 className="h-3.5 w-3.5 animate-spin text-violet-400" /><span className="text-xs text-violet-400">Sending…</span></>}
+                              {p.status === 'sent' && <span className="text-xs font-medium text-emerald-400">✓ Sent</span>}
+                              {p.status === 'failed' && <span className="text-xs text-red-400" title={p.error}>✕ Failed</span>}
+                            </div>
                           </div>
-                          <span className="font-medium">{r.email}</span>
-                        </div>
-                        <div className="flex items-center gap-2 shrink-0">
-                          {r.verified && (
-                            <span className="rounded-full bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 text-[11px] font-medium text-emerald-400">
-                              Verified
-                            </span>
-                          )}
-                          {r.source && (
-                            <span className="rounded-full bg-white/[0.06] border border-white/[0.08] px-2 py-0.5 text-[11px] text-zinc-500">
-                              {r.source}
-                            </span>
-                          )}
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                  {selectedRecipient && (
-                    <div className="mt-3 rounded-lg border border-white/[0.08] bg-white/[0.04] px-3 py-2 text-xs text-zinc-400">
-                      Sending to: <span className="font-medium text-zinc-200">{selectedRecipient}</span>
+                        ))}
+                      </div>
                     </div>
+                  ) : (
+                    <>
+                      {/* Select all row */}
+                      <div className="flex items-center justify-between mb-1">
+                        <p className="text-xs text-zinc-500">
+                          {recipients.length} recipient{recipients.length !== 1 ? 's' : ''} found — select to send individually with a {MULTI_SEND_DELAY_MS / 1000}s delay between each.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={toggleAll}
+                          className="text-xs text-violet-400 hover:text-violet-300 transition-colors shrink-0 ml-4"
+                        >
+                          {allSelected ? 'Deselect all' : 'Select all'}
+                        </button>
+                      </div>
+
+                      <div className="max-h-[300px] overflow-y-auto space-y-2 pr-1">
+                        {recipients.map((r, i) => {
+                          const isChecked = selectedEmails.has(r.email);
+                          return (
+                            <button
+                              key={`${r.email}-${i}`}
+                              type="button"
+                              onClick={() => toggleEmail(r.email)}
+                              className={`w-full flex items-center justify-between rounded-lg border px-4 py-3 text-left text-sm transition-colors ${
+                                isChecked
+                                  ? 'border-violet-500/40 bg-violet-500/10 text-violet-200'
+                                  : 'border-white/[0.08] bg-white/[0.03] text-zinc-300 hover:bg-white/[0.06]'
+                              }`}
+                            >
+                              <div className="flex items-center gap-3">
+                                {/* Checkbox */}
+                                <div className={`h-4 w-4 rounded border-2 shrink-0 flex items-center justify-center transition-colors ${
+                                  isChecked ? 'border-violet-500 bg-violet-500' : 'border-zinc-600'
+                                }`}>
+                                  {isChecked && (
+                                    <svg className="h-2.5 w-2.5 text-white" viewBox="0 0 12 12" fill="none">
+                                      <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                                    </svg>
+                                  )}
+                                </div>
+                                <span className="font-medium">{r.email}</span>
+                              </div>
+                              <div className="flex items-center gap-2 shrink-0">
+                                {r.verified && (
+                                  <span className="rounded-full bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 text-[11px] font-medium text-emerald-400">
+                                    Verified
+                                  </span>
+                                )}
+                                {r.source && (
+                                  <span className="rounded-full bg-white/[0.06] border border-white/[0.08] px-2 py-0.5 text-[11px] text-zinc-500">
+                                    {r.source}
+                                  </span>
+                                )}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      {/* Summary bar */}
+                      {selectedEmails.size > 0 && (
+                        <div className="mt-2 rounded-lg border border-white/[0.08] bg-white/[0.04] px-3 py-2 text-xs text-zinc-400">
+                          {selectedEmails.size === 1
+                            ? <>Sending to: <span className="font-medium text-zinc-200">{[...selectedEmails][0]}</span></>
+                            : <><span className="font-medium text-zinc-200">{selectedEmails.size} recipients</span> selected — emails sent one at a time with a {MULTI_SEND_DELAY_MS / 1000}s gap. Est. ~{Math.round((selectedEmails.size - 1) * MULTI_SEND_DELAY_MS / 1000)}s total.</>
+                          }
+                        </div>
+                      )}
+                    </>
                   )}
                 </>
               )}
             </div>
           )}
 
-          {/* Footer buttons */}
+          {/* Footer */}
           <div className="mt-6 flex justify-end gap-3">
             <Button
               variant="outline"
               className="border-white/[0.08] bg-white/[0.04] text-zinc-300"
               onClick={() => handleDialogOpenChange(false)}
-              disabled={isSaving || isSending || isLoading}
+              disabled={isSending}
             >
-              Cancel
+              {sendComplete ? 'Close' : 'Cancel'}
             </Button>
 
             {step === 'compose' && (
@@ -648,15 +778,17 @@ function DraftComposer({ company, open, onOpenChange, onSaved, onSent }: DraftCo
               </>
             )}
 
-            {step === 'pick-recipient' && (
+            {step === 'pick-recipient' && !sendComplete && (
               <Button
                 className="bg-violet-600 hover:bg-violet-700 shadow-lg shadow-violet-900/30"
                 onClick={handleConfirmSend}
-                disabled={isSending || !selectedRecipient || recipients.length === 0}
+                disabled={isSending || selectedEmails.size === 0 || recipients.length === 0}
               >
                 {isSending
                   ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Sending…</>
-                  : <><Send className="mr-2 h-4 w-4" /> Confirm & Send</>}
+                  : selectedEmails.size > 1
+                    ? <><Send className="mr-2 h-4 w-4" /> Send to {selectedEmails.size} Recipients</>
+                    : <><Send className="mr-2 h-4 w-4" /> Confirm & Send</>}
               </Button>
             )}
           </div>
