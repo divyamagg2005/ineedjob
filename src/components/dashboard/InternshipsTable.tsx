@@ -427,7 +427,15 @@ function DraftComposer({ company, open, onOpenChange, onSaved, onSent }: DraftCo
         source: r.source ?? null,
         verified: r.verified ?? null,
       }));
-      setRecipients(list);
+      // Deduplicate by email (same address can appear in both company_emails and recruiter_emails)
+      const seen = new Set<string>();
+      const deduped = list.filter((r) => {
+        const key = r.email.toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      setRecipients(deduped);
       setSelectedRecipient(list[0]?.email ?? '');
       setStep('pick-recipient');
     } catch (err) {
@@ -561,9 +569,9 @@ function DraftComposer({ company, open, onOpenChange, onSaved, onSent }: DraftCo
                     {recipients.length} recipient{recipients.length !== 1 ? 's' : ''} found — select one to send to.
                   </p>
                   <div className="max-h-[320px] overflow-y-auto space-y-2 pr-1">
-                    {recipients.map((r) => (
+                    {recipients.map((r, i) => (
                       <button
-                        key={r.email}
+                        key={`${r.email}-${i}`}
                         type="button"
                         onClick={() => setSelectedRecipient(r.email)}
                         className={`w-full flex items-center justify-between rounded-lg border px-4 py-3 text-left text-sm transition-colors ${
