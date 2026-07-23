@@ -799,6 +799,206 @@ function DraftComposer({ company, open, onOpenChange, onSaved, onSent }: DraftCo
   );
 }
 
+const FOLLOW_UP_MAX_ATTEMPTS = 5;
+
+interface FollowUpResult {
+  email: string;
+  success: boolean;
+  error?: string;
+}
+
+interface FollowUpComposerProps {
+  company: Company | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSent: () => void;
+}
+
+function FollowUpComposer({ company, open, onOpenChange, onSent }: FollowUpComposerProps) {
+  const [subject, setSubject] = useState('');
+  const [body, setBody] = useState('');
+  const [isSending, setIsSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [results, setResults] = useState<FollowUpResult[] | null>(null);
+
+  const currentUser = getStoredUser();
+
+  React.useEffect(() => {
+    if (open) {
+      setSubject('');
+      setBody('');
+      setError(null);
+      setResults(null);
+      setIsSending(false);
+    }
+  }, [open, company?.id]);
+
+  if (!open || !company) return null;
+
+  const attemptsUsed = company.followup_count ?? 0;
+  const attemptsRemaining = Math.max(0, FOLLOW_UP_MAX_ATTEMPTS - attemptsUsed);
+
+  const handleSend = async () => {
+    if (isSending) return;
+    if (!currentUser?.accessToken) {
+      setError('You must be signed in to send follow-ups.');
+      return;
+    }
+    const trimmedBody = body.trim();
+    if (!trimmedBody) {
+      setError('Please write a follow-up message before sending.');
+      return;
+    }
+
+    setIsSending(true);
+    setError(null);
+    setResults(null);
+
+    try {
+      const response = await fetch('/api/outreach/send', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-google-access-token': currentUser.accessToken,
+        },
+        body: JSON.stringify({
+          companyId: company.id,
+          followUp: true,
+          followUpSubject: subject.trim() || null,
+          followUpBody: trimmedBody,
+        }),
+      });
+
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(result?.error || 'Failed to send follow-up email.');
+      }
+
+      setResults(Array.isArray(result?.results) ? result.results : []);
+      const sentCount = Number(result?.sentCount ?? 0);
+      const total = Number(result?.totalRecipients ?? 0);
+      if (sentCount > 0) {
+        toast.success(
+          sentCount === total
+            ? `Follow-up ${result?.followUpNumber ?? ''} sent to ${sentCount} recipient${sentCount === 1 ? '' : 's'} at ${company.company_name}.`
+            : `${sentCount} of ${total} follow-ups sent to ${company.company_name}.`
+        );
+        onSent();
+      } else {
+        toast.error('No follow-ups could be sent.');
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unexpected error.';
+      setError(message);
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+  const handleDialogOpenChange = (nextOpen: boolean) => {
+    if (isSending) return;
+    onOpenChange(nextOpen);
+  };
+
+  return (
+    <Dialog.Root open={open} onOpenChange={handleDialogOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm" />
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-full max-w-2xl -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-white/[0.08] bg-zinc-900 p-6 shadow-2xl shadow-black/50 focus:outline-none">
+          <div className="mb-5 flex items-start justify-between gap-4">
+            <div>
+              <Dialog.Title className="text-lg font-semibold text-white">Send Follow-Up</Dialog.Title>
+              <Dialog.Description className="mt-1 text-sm text-zinc-500">
+                Write a new message to send to everyone who received your initial email at {company.company_name}.
+              </Dialog.Description>
+            </div>
+            <div className="rounded-full border border-white/[0.08] bg-white/[0.04] px-2.5 py-1 text-xs font-medium text-zinc-400 shrink-0">
+              {attemptsRemaining} of {FOLLOW_UP_MAX_ATTEMPTS} left
+            </div>
+          </div>
+
+          <div className="mb-4 rounded-lg border border-white/[0.08] bg-white/[0.04] px-3 py-2 text-xs text-zinc-400">
+            {getFollowUpStatusText(company)} · You can send up to {FOLLOW_UP_MAX_ATTEMPTS} follow-ups, one per week.
+          </div>
+
+          {error && (
+            <div className="mb-4 rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-400">{error}</div>
+          )}
+
+          {results ? (
+            <div className="space-y-2">
+              <p className="text-xs text-zinc-500 mb-1">
+                {results.filter((r) => r.success).length} sent, {results.filter((r) => !r.success).length} failed.
+              </p>
+              <div className="max-h-[280px] overflow-y-auto space-y-2 pr-1">
+                {results.map((r) => (
+                  <div
+                    key={r.email}
+                    className={`flex items-center justify-between rounded-lg border px-4 py-3 text-sm ${
+                      r.success ? 'border-emerald-500/20 bg-emerald-500/10' : 'border-red-500/20 bg-red-500/10'
+                    }`}
+                  >
+                    <span className={`font-medium truncate ${r.success ? 'text-emerald-300' : 'text-red-300'}`}>{r.email}</span>
+                    <span className={`text-xs shrink-0 ml-3 ${r.success ? 'text-emerald-400' : 'text-red-400'}`} title={r.error}>
+                      {r.success ? '✓ Sent' : `✕ ${r.error ?? 'Failed'}`}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <div>
+                <label className="mb-2 block text-sm font-medium text-zinc-300">Subject <span className="text-zinc-500">(optional)</span></label>
+                <Input
+                  value={subject}
+                  onChange={(e) => setSubject(e.target.value)}
+                  placeholder="Leave blank to auto-generate a follow-up subject"
+                  className="bg-white/[0.04] border-white/[0.08] text-zinc-200"
+                  disabled={isSending}
+                />
+              </div>
+              <div>
+                <label className="mb-2 block text-sm font-medium text-zinc-300">Follow-Up Message</label>
+                <textarea
+                  value={body}
+                  onChange={(e) => setBody(e.target.value)}
+                  placeholder="Write your follow-up message"
+                  rows={9}
+                  disabled={isSending}
+                  className="min-h-[200px] w-full rounded-lg border border-white/[0.08] bg-white/[0.04] px-3 py-2 text-sm text-zinc-200 outline-none focus:border-violet-500/40 disabled:opacity-60"
+                />
+              </div>
+            </div>
+          )}
+
+          <div className="mt-6 flex justify-end gap-3">
+            <Button
+              variant="outline"
+              className="border-white/[0.08] bg-white/[0.04] text-zinc-300"
+              onClick={() => handleDialogOpenChange(false)}
+              disabled={isSending}
+            >
+              {results ? 'Close' : 'Cancel'}
+            </Button>
+            {!results && (
+              <Button
+                className="bg-violet-600 hover:bg-violet-700 shadow-lg shadow-violet-900/30"
+                onClick={handleSend}
+                disabled={isSending || attemptsRemaining === 0}
+              >
+                {isSending
+                  ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Sending…</>
+                  : <><Send className="mr-2 h-4 w-4" /> Send Follow-Up</>}
+              </Button>
+            )}
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
 export function InternshipsTable() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState('');
@@ -808,8 +1008,9 @@ export function InternshipsTable() {
   const [resumeAttachedCompanyIds, setResumeAttachedCompanyIds] = useState<Record<number, boolean>>({});
   const [composerCompany, setComposerCompany] = useState<Company | null>(null);
   const [composerOpen, setComposerOpen] = useState(false);
+  const [followUpCompany, setFollowUpCompany] = useState<Company | null>(null);
+  const [followUpOpen, setFollowUpOpen] = useState(false);
   const [savingDraft, setSavingDraft] = useState(false);
-  const [sendingCompanyId, setSendingCompanyId] = useState<number | null>(null);
   const [downloadingCompanyId, setDownloadingCompanyId] = useState<number | null>(null);
   const [historyCompany, setHistoryCompany] = useState<Company | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -907,51 +1108,10 @@ export function InternshipsTable() {
     }
   }, [currentUser?.accessToken]);
 
-  const handleSendClick = useCallback(async (company: Company) => {
-    if (!currentUser?.accessToken || sendingCompanyId !== null) {
-      return;
-    }
-
-    const confirmed = window.confirm(`Send the outreach email for ${company.company_name}?`);
-    if (!confirmed) {
-      return;
-    }
-
-    const isFollowUpEligible = Boolean(
-      company.last_sent_at &&
-      company.followup_count < 5 &&
-      (!company.next_followup_at || new Date(company.next_followup_at) <= new Date())
-    );
-
-    setSendingCompanyId(company.id);
-    try {
-      const response = await fetch('/api/outreach/send', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-google-access-token': currentUser.accessToken,
-        },
-        body: JSON.stringify({ campaignId: null, companyId: company.id, followUp: isFollowUpEligible }),
-      });
-
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(result?.error || 'Failed to send email.');
-      }
-
-      toast.success(isFollowUpEligible ? `Follow-up sent successfully to ${company.company_name}.` : `Email sent successfully to ${company.company_name}.`);
-      queryClient.invalidateQueries({ queryKey: ['companies', currentUser?.email, currentUser?.userId] });
-      queryClient.invalidateQueries({ queryKey: ['dashboardStats'] });
-      queryClient.invalidateQueries({ queryKey: ['hunterStatus'] });
-      queryClient.invalidateQueries({ queryKey: ['databaseStatus'] });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unexpected error.';
-      toast.error(message);
-      console.error('[send-mail]', error);
-    } finally {
-      setSendingCompanyId(null);
-    }
-  }, [currentUser?.accessToken, currentUser?.email, currentUser?.userId, queryClient, sendingCompanyId]);
+  const handleFollowUpClick = useCallback((company: Company) => {
+    setFollowUpCompany(company);
+    setFollowUpOpen(true);
+  }, []);
 
   const handleResumeSelection = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = event.target.files?.[0];
@@ -1151,32 +1311,34 @@ export function InternshipsTable() {
                           >
                             History
                           </Button>
-                          {(company.followup_count >= 5 || (company.last_sent_at && company.next_followup_at && new Date(company.next_followup_at) > new Date())) ? (
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              className="h-8 border-white/[0.08] bg-white/[0.04] text-zinc-400 hover:bg-white/[0.08] hover:text-zinc-200"
-                              disabled
-                            >
-                              {company.followup_count >= 5 ? 'Follow Up Complete' : 'Follow Up'}
-                            </Button>
-                          ) : (
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              className="h-8 border-violet-500/20 bg-violet-500/10 text-violet-300 hover:bg-violet-500/20"
-                              onClick={() => handleSendClick(company)}
-                              disabled={sendingCompanyId === company.id}
-                            >
-                              {sendingCompanyId === company.id ? (
-                                <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> Sending...</>
-                              ) : (
-                                <><Send className="mr-1.5 h-3.5 w-3.5" /> Follow Up</>
-                              )}
-                            </Button>
-                          )}
+                          {(() => {
+                            const followUpComplete = company.followup_count >= 5;
+                            const notSentYet = !company.last_sent_at;
+                            const notDueYet = Boolean(
+                              company.last_sent_at &&
+                              company.next_followup_at &&
+                              new Date(company.next_followup_at) > new Date()
+                            );
+                            const disabled = followUpComplete || notSentYet || notDueYet;
+                            return (
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className={
+                                  disabled
+                                    ? 'h-8 border-white/[0.08] bg-white/[0.04] text-zinc-400 hover:bg-white/[0.08] hover:text-zinc-200'
+                                    : 'h-8 border-violet-500/20 bg-violet-500/10 text-violet-300 hover:bg-violet-500/20'
+                                }
+                                onClick={() => handleFollowUpClick(company)}
+                                disabled={disabled}
+                                title={notSentYet ? 'Send the initial email before following up.' : undefined}
+                              >
+                                <Send className="mr-1.5 h-3.5 w-3.5" />
+                                {followUpComplete ? 'Follow Up Complete' : 'Follow Up'}
+                              </Button>
+                            );
+                          })()}
                           <ActionsMenu company={company} onBlacklist={handleBlacklistRequest} />
                         </div>
                       </td>
@@ -1224,6 +1386,20 @@ export function InternshipsTable() {
         onSaved={() => {
           setSavingDraft(false);
           queryClient.invalidateQueries({ queryKey: ['companies', currentUser?.email, currentUser?.userId] });
+        }}
+        onSent={() => {
+          queryClient.invalidateQueries({ queryKey: ['companies', currentUser?.email, currentUser?.userId] });
+          queryClient.invalidateQueries({ queryKey: ['dashboardStats'] });
+        }}
+      />
+      <FollowUpComposer
+        company={followUpCompany}
+        open={followUpOpen}
+        onOpenChange={(open) => {
+          setFollowUpOpen(open);
+          if (!open) {
+            setFollowUpCompany(null);
+          }
         }}
         onSent={() => {
           queryClient.invalidateQueries({ queryKey: ['companies', currentUser?.email, currentUser?.userId] });

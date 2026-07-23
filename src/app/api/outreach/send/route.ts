@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getRequestAccessToken } from '@/lib/user-context';
-import { sendInitialCampaignEmailWithErrorHandling, sendFollowUpCampaignEmailWithErrorHandling, sendInitialCampaignEmailToRecipient } from '@/lib/email-sending';
+import { sendInitialCampaignEmailWithErrorHandling, sendFollowUpCampaignEmailWithErrorHandling, sendInitialCampaignEmailToRecipient, sendFollowUpToCompanyRecipients } from '@/lib/email-sending';
 import { query } from '@/lib/db';
 import { getAuthenticatedUserContext } from '@/lib/user-context';
 
@@ -12,6 +12,17 @@ export async function POST(request: NextRequest) {
     const companyId = Number(payload?.companyId ?? payload?.company_id);
     const followUp = Boolean(payload?.followUp ?? payload?.follow_up ?? payload?.mode === 'followup');
     const recipientEmail = typeof payload?.recipientEmail === 'string' ? payload.recipientEmail.trim() : null;
+    const followUpSubject = typeof payload?.followUpSubject === 'string' ? payload.followUpSubject : null;
+    const followUpBody = typeof payload?.followUpBody === 'string' ? payload.followUpBody : null;
+
+    // Company follow-up: send a fresh message to everyone who received the initial email.
+    if (followUp && Number.isInteger(companyId) && companyId > 0) {
+      const result = await sendFollowUpToCompanyRecipients({ companyId, accessToken, followUpSubject, followUpBody });
+      if (!result.success) {
+        return NextResponse.json({ error: result.error ?? 'Failed to send follow-up email.', ...result }, { status: 400 });
+      }
+      return NextResponse.json(result, { status: 200 });
+    }
 
     // When a specific recipient is provided, look up the saved draft and send directly to that address
     if (recipientEmail && Number.isInteger(companyId) && companyId > 0 && !followUp) {

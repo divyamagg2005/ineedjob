@@ -931,6 +931,278 @@ export async function sendFollowUpCampaignEmail({
   };
 }
 
+const FOLLOW_UP_MAX_ATTEMPTS = 5;
+const FOLLOW_UP_INTERVAL_DAYS = 7;
+const FOLLOW_UP_INTERVAL_MS = FOLLOW_UP_INTERVAL_DAYS * 24 * 60 * 60 * 1000;
+
+export interface FollowUpRecipientResult {
+  email: string;
+  success: boolean;
+  error?: string;
+}
+
+export interface SendCompanyFollowUpResult {
+  success: boolean;
+  error?: string;
+  status?: string;
+  followUpNumber?: number;
+  attemptsRemaining?: number;
+  nextFollowUpAt?: string | null;
+  sentCount?: number;
+  totalRecipients?: number;
+  results?: FollowUpRecipientResult[];
+}
+
+interface FollowUpRecipientCampaign {
+  id: number;
+  recruiter_email_id: number | null;
+  recruiter_email: string;
+  email_subject: string | null;
+  email_body: string | null;
+  resume_url: string | null;
+  followup_count: number | null;
+  last_sent_at: string | null;
+}
+
+/**
+ * Sends a follow-up to every recipient the initial outreach for a company was sent to.
+ * Enforces a maximum of 5 follow-up attempts per company, each at least one week apart,
+ * and lets the caller provide a brand new follow-up message (subject/body). The resume is
+ * re-attached when one is on file but is optional.
+ */
+export async function sendFollowUpToCompanyRecipients({
+  companyId,
+  accessToken,
+  followUpSubject,
+  followUpBody,
+}: {
+  companyId: number;
+  accessToken?: string | null;
+  followUpSubject?: string | null;
+  followUpBody?: string | null;
+}): Promise<SendCompanyFollowUpResult> {
+  const authenticatedUser = await getAuthenticatedUserContext(undefined, undefined, accessToken);
+
+  const customBody = normalizeText(followUpBody);
+  if (!customBody) {
+    return { success: false, error: 'Please write a follow-up message before sending.', status: 'FAILED' };
+  }
+  const customSubject = normalizeText(followUpSubject);
+
+  // Every recipient the initial email reached is its own campaign row. Grab the most
+  // recent sent campaign per recipient so we can follow up with each of them.
+  const recipientCampaigns = await query<FollowUpRecipientCampaign>(
+    `SELECT DISTINCT ON (oc.recruiter_email_id)
+        oc.id,
+        oc.recruiter_email_id,
+        re.recruiter_email,
+        oc.email_subject,
+        oc.email_body,
+        oc.resume_url,
+        oc.followup_count,
+        oc.last_sent_at
+     FROM outreach_campaigns oc
+     JOIN recruiter_emails re ON re.id = oc.recruiter_email_id
+     WHERE oc.user_id = $1
+       AND oc.company_id = $2
+       AND oc.last_sent_at IS NOT NULL
+       AND re.recruiter_email IS NOT NULL
+     ORDER BY oc.recruiter_email_id, oc.last_sent_at DESC, oc.id DESC`,
+    [authenticatedUser.id, companyId]
+  );
+
+  const recipients = recipientCampaigns.rows;
+  if (recipients.length === 0) {
+    return {
+      success: false,
+      error: 'No recipients have received the initial email yet. Send the outreach email first.',
+      status: 'FAILED',
+    };
+  }
+
+  // Company-level attempt tracking: all recipients advance together.
+  const attemptsUsed = recipients.reduce((max, row) => Math.max(max, Number(row.followup_count ?? 0)), 0);
+  if (attemptsUsed >= FOLLOW_UP_MAX_ATTEMPTS) {
+    return {
+      success: false,
+      error: `You have already used all ${FOLLOW_UP_MAX_ATTEMPTS} follow-up attempts for this company.`,
+      status: 'COMPLETED',
+      attemptsRemaining: 0,
+    };
+  }
+
+  const lastSentAtMs = recipients.reduce((latest, row) => {
+    const ts = row.last_sent_at ? new Date(row.last_sent_at).getTime() : 0;
+    return Number.isFinite(ts) ? Math.max(latest, ts) : latest;
+  }, 0);
+
+  if (lastSentAtMs > 0) {
+    const elapsed = Date.now() - lastSentAtMs;
+    if (elapsed < FOLLOW_UP_INTERVAL_MS) {
+      const availableAt = new Date(lastSentAtMs + FOLLOW_UP_INTERVAL_MS);
+      const daysRemaining = Math.max(1, Math.ceil((FOLLOW_UP_INTERVAL_MS - elapsed) / (24 * 60 * 60 * 1000)));
+      return {
+        success: false,
+        error: `Follow-ups can only be sent once a week. The next follow-up will be available in ${daysRemaining} day${daysRemaining === 1 ? '' : 's'} (on ${availableAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}).`,
+        status: 'FOLLOW-UP DUE',
+        nextFollowUpAt: availableAt.toISOString(),
+        attemptsRemaining: FOLLOW_UP_MAX_ATTEMPTS - attemptsUsed,
+      };
+    }
+  }
+
+  const followUpNumber = attemptsUsed + 1;
+  const senderEmail = authenticatedUser.email;
+  const nowIso = new Date().toISOString();
+
+  // Cache resume buffers so we only fetch each object from S3 once.
+  const resumeBufferCache = new Map<string, Buffer | null>();
+  const loadResume = async (resumeUrl: string | null): Promise<Buffer | null> => {
+    const key = normalizeText(resumeUrl);
+    if (!key) {
+      return null;
+    }
+    if (resumeBufferCache.has(key)) {
+      return resumeBufferCache.get(key) ?? null;
+    }
+    try {
+      const buffer = await getResumeBufferFromS3(key);
+      resumeBufferCache.set(key, buffer);
+      return buffer;
+    } catch (error) {
+      console.warn('Follow-up resume attachment could not be loaded; sending without it.', {
+        companyId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      resumeBufferCache.set(key, null);
+      return null;
+    }
+  };
+
+  const results: FollowUpRecipientResult[] = [];
+
+  for (const recipient of recipients) {
+    const recipientEmail = normalizeText(recipient.recruiter_email);
+    if (!recipientEmail || !isValidRecipientAddress(recipientEmail)) {
+      results.push({ email: recipient.recruiter_email ?? 'unknown', success: false, error: 'Invalid recipient email address.' });
+      continue;
+    }
+
+    const subject = customSubject
+      ? customSubject
+      : buildFollowUpSubject({ originalSubject: normalizeText(recipient.email_subject) ?? '', followUpNumber });
+    const body = customBody;
+
+    try {
+      const attachmentBuffer = await loadResume(recipient.resume_url);
+      const mimeMessage = createMimeMessage({
+        recipient: recipientEmail,
+        subject,
+        body,
+        attachmentBuffer,
+        attachmentName: attachmentBuffer ? 'resume.pdf' : null,
+        senderEmail,
+      });
+
+      const encodedMessage = Buffer.from(mimeMessage, 'utf8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+
+      const lastThreadResult = await query<{ gmail_thread_id: string | null }>(
+        `SELECT gmail_thread_id
+         FROM email_logs
+         WHERE campaign_id = $1 AND gmail_thread_id IS NOT NULL
+         ORDER BY sent_at DESC, id DESC
+         LIMIT 1`,
+        [recipient.id]
+      );
+
+      const threadId = lastThreadResult.rows[0]?.gmail_thread_id ?? null;
+      const requestBody = threadId ? { raw: encodedMessage, threadId } : { raw: encodedMessage };
+
+      const gmailResponse = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody),
+      });
+
+      const gmailPayload = await gmailResponse.json().catch(() => ({}));
+
+      if (!gmailResponse.ok) {
+        const errorMessage = typeof gmailPayload?.error?.message === 'string'
+          ? gmailPayload.error.message
+          : 'Gmail rejected the message.';
+        console.warn('Gmail send failed for follow-up.', getSendContextLogFields({ campaignId: recipient.id, companyId, recipientEmail, followUp: true }));
+        throw new Error(errorMessage);
+      }
+
+      const messageId = typeof gmailPayload?.id === 'string' ? gmailPayload.id : null;
+      const receivedThreadId = typeof gmailPayload?.threadId === 'string' ? gmailPayload.threadId : threadId;
+
+      await query(
+        `UPDATE outreach_campaigns
+         SET followup_count = $1,
+             last_sent_at = NOW(),
+             next_followup_at = CASE WHEN $1 < $2 THEN NOW() + ($3 || ' days')::interval ELSE NULL END,
+             status = CASE WHEN $1 >= $2 THEN 'COMPLETED' ELSE 'SENT' END,
+             updated_at = NOW()
+         WHERE id = $4 AND user_id = $5`,
+        [followUpNumber, FOLLOW_UP_MAX_ATTEMPTS, String(FOLLOW_UP_INTERVAL_DAYS), recipient.id, authenticatedUser.id]
+      );
+
+      await query(
+        `INSERT INTO email_logs (campaign_id, gmail_message_id, gmail_thread_id, send_type, status, error_message, sent_at)
+         VALUES ($1, $2, $3, $4, 'SENT', NULL, NOW())`,
+        [recipient.id, messageId, receivedThreadId, getFollowUpSendType(followUpNumber)]
+      );
+
+      results.push({ email: recipientEmail, success: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to send follow-up email.';
+      await query(
+        `INSERT INTO email_logs (campaign_id, gmail_message_id, gmail_thread_id, send_type, status, error_message, sent_at)
+         VALUES ($1, NULL, NULL, $2, 'FAILED', $3, NOW())`,
+        [recipient.id, getFollowUpSendType(followUpNumber), toSafeUserError(message)]
+      ).catch((logError) => console.error('Failed to log follow-up send error:', logError));
+
+      results.push({ email: recipientEmail, success: false, error: toSafeUserError(message) });
+    }
+  }
+
+  const sentCount = results.filter((r) => r.success).length;
+  const attemptsRemaining = sentCount > 0
+    ? FOLLOW_UP_MAX_ATTEMPTS - followUpNumber
+    : FOLLOW_UP_MAX_ATTEMPTS - attemptsUsed;
+  const nextFollowUpAt = sentCount > 0 && followUpNumber < FOLLOW_UP_MAX_ATTEMPTS
+    ? new Date(Date.now() + FOLLOW_UP_INTERVAL_MS).toISOString()
+    : null;
+
+  if (sentCount === 0) {
+    return {
+      success: false,
+      error: results[0]?.error ?? 'We could not deliver the follow-up email. Please try again later.',
+      status: 'FAILED',
+      followUpNumber,
+      attemptsRemaining,
+      totalRecipients: recipients.length,
+      sentCount,
+      results,
+    };
+  }
+
+  return {
+    success: true,
+    status: followUpNumber >= FOLLOW_UP_MAX_ATTEMPTS ? 'COMPLETED' : 'SENT',
+    followUpNumber,
+    attemptsRemaining,
+    nextFollowUpAt,
+    sentCount,
+    totalRecipients: recipients.length,
+    results,
+  };
+}
+
 export async function sendFollowUpCampaignEmailWithErrorHandling({
   campaignId,
   companyId,
