@@ -16,9 +16,10 @@ import {
   FileText,
   Send,
   Download,
+  Plus,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { fetchCompanies, blacklistCompany, type Company } from '@/app/actions/companies';
+import { fetchCompanies, blacklistCompany, addCompanyByName, type Company } from '@/app/actions/companies';
 import { saveDraftForCompany, loadDraftForCompany } from '@/app/actions/campaign-drafts';
 import { uploadResumeForCompany, getResumeDownloadUrl } from '@/app/actions/resumes';
 import { getCompanyOutreachHistory, type CompanyOutreachHistoryRow } from '@/app/actions/outreach-history';
@@ -999,6 +1000,149 @@ function FollowUpComposer({ company, open, onOpenChange, onSent }: FollowUpCompo
   );
 }
 
+interface AddCompanyDialogProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onAdded: () => void;
+}
+
+function AddCompanyDialog({ open, onOpenChange, onAdded }: AddCompanyDialogProps) {
+  const [name, setName] = useState('');
+  const [domain, setDomain] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const currentUser = getStoredUser();
+
+  React.useEffect(() => {
+    if (open) {
+      setName('');
+      setDomain('');
+      setError(null);
+      setIsSubmitting(false);
+    }
+  }, [open]);
+
+  const handleSubmit = async () => {
+    if (isSubmitting) return;
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      setError('Please enter a company name.');
+      return;
+    }
+    if (!currentUser?.accessToken) {
+      setError('You must be signed in to add a company.');
+      return;
+    }
+
+    setIsSubmitting(true);
+    setError(null);
+    try {
+      const result = await addCompanyByName(trimmedName, domain.trim() || null, currentUser.accessToken);
+      if (!result.success) {
+        throw new Error(result.error ?? 'Unable to add company.');
+      }
+
+      const found = result.emailsFound ?? 0;
+      const added = result.emailsAdded ?? 0;
+      const domainPart = result.domain ? ` (${result.domain})` : '';
+
+      if (found === 0) {
+        toast.success(`${result.companyName}${domainPart} added — no emails were found by Hunter.`);
+      } else {
+        toast.success(
+          `${result.companyName}${domainPart} added — ${found} email${found === 1 ? '' : 's'} found${added !== found ? `, ${added} new` : ''}.`,
+        );
+      }
+
+      if (result.alreadyExisted) {
+        toast.info(`${result.companyName} already existed — refreshed its emails.`);
+      }
+
+      onAdded();
+      onOpenChange(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to add company.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleDialogOpenChange = (nextOpen: boolean) => {
+    if (isSubmitting) return;
+    onOpenChange(nextOpen);
+  };
+
+  return (
+    <Dialog.Root open={open} onOpenChange={handleDialogOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm animate-in fade-in-0" />
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-full max-w-md -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-white/[0.08] bg-zinc-900 p-6 shadow-2xl shadow-black/50 animate-in fade-in-0 zoom-in-95 focus:outline-none">
+          <div className="mb-5 flex h-12 w-12 items-center justify-center rounded-2xl bg-violet-500/10 border border-violet-500/20">
+            <Building2 className="h-6 w-6 text-violet-400" />
+          </div>
+          <Dialog.Title className="text-lg font-semibold text-white mb-1">Add Company</Dialog.Title>
+          <Dialog.Description className="text-sm text-zinc-500 mb-5 leading-relaxed">
+            Enter a company name and we&apos;ll use Hunter to find its email addresses, then add it to your dashboard.
+          </Dialog.Description>
+
+          {error && (
+            <div className="mb-4 rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-400">{error}</div>
+          )}
+
+          <div className="space-y-4">
+            <div>
+              <label className="mb-2 block text-sm font-medium text-zinc-300">Company Name</label>
+              <Input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSubmit(); } }}
+                placeholder="e.g. Stripe"
+                autoFocus
+                disabled={isSubmitting}
+                className="bg-white/[0.04] border-white/[0.08] text-zinc-200"
+              />
+            </div>
+            <div>
+              <label className="mb-2 block text-sm font-medium text-zinc-300">
+                Domain <span className="text-zinc-500">(optional, improves accuracy)</span>
+              </label>
+              <Input
+                value={domain}
+                onChange={(e) => setDomain(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSubmit(); } }}
+                placeholder="e.g. stripe.com"
+                disabled={isSubmitting}
+                className="bg-white/[0.04] border-white/[0.08] text-zinc-200"
+              />
+            </div>
+          </div>
+
+          <div className="mt-6 flex justify-end gap-3">
+            <Button
+              variant="outline"
+              className="border-white/[0.08] bg-white/[0.04] text-zinc-300"
+              onClick={() => handleDialogOpenChange(false)}
+              disabled={isSubmitting}
+            >
+              Cancel
+            </Button>
+            <Button
+              className="bg-violet-600 hover:bg-violet-700 shadow-lg shadow-violet-900/30 min-w-[140px]"
+              onClick={handleSubmit}
+              disabled={isSubmitting}
+            >
+              {isSubmitting
+                ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Searching…</>
+                : <><Plus className="mr-2 h-4 w-4" /> Add Company</>}
+            </Button>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
 export function InternshipsTable() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState('');
@@ -1017,6 +1161,7 @@ export function InternshipsTable() {
   const [historyRows, setHistoryRows] = useState<CompanyOutreachHistoryRow[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [page, setPage] = useState(1);
+  const [addCompanyOpen, setAddCompanyOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [pendingCompanyId, setPendingCompanyId] = useState<number | null>(null);
 
@@ -1195,6 +1340,14 @@ export function InternshipsTable() {
               aria-label="Refresh companies list"
             >
               <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? 'animate-spin' : ''}`} />
+            </Button>
+            <Button
+              size="sm"
+              className="h-8 shrink-0 bg-violet-600 hover:bg-violet-700 text-white shadow-lg shadow-violet-900/30"
+              onClick={() => setAddCompanyOpen(true)}
+            >
+              <Plus className="mr-1.5 h-3.5 w-3.5" />
+              Add Company
             </Button>
           </div>
         </div>
@@ -1402,6 +1555,14 @@ export function InternshipsTable() {
           }
         }}
         onSent={() => {
+          queryClient.invalidateQueries({ queryKey: ['companies', currentUser?.email, currentUser?.userId] });
+          queryClient.invalidateQueries({ queryKey: ['dashboardStats'] });
+        }}
+      />
+      <AddCompanyDialog
+        open={addCompanyOpen}
+        onOpenChange={setAddCompanyOpen}
+        onAdded={() => {
           queryClient.invalidateQueries({ queryKey: ['companies', currentUser?.email, currentUser?.userId] });
           queryClient.invalidateQueries({ queryKey: ['dashboardStats'] });
         }}
