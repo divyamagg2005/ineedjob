@@ -549,7 +549,7 @@ export async function sendInitialCampaignEmailToRecipient({
     if (normalizedResumeUrl) {
       try {
         attachmentBuffer = await getResumeBufferFromS3(normalizedResumeUrl);
-        attachmentName = normalizedResumeUrl.split('/').pop() || 'resume.pdf';
+        attachmentName = 'resume.pdf';
       } catch (error) {
         // Fail hard — don't send the email without the resume
         const message = error instanceof Error ? error.message : 'Unable to fetch resume from S3.';
@@ -718,7 +718,7 @@ export async function sendInitialCampaignEmail({
   }
 
   const senderEmail = authenticatedUser.email;
-  const attachmentName = resumeKey.split('/').pop() || 'resume.pdf';
+  const attachmentName = 'resume.pdf';
   const mimeMessage = createMimeMessage({
     recipient: recipientEmail,
     subject,
@@ -854,7 +854,7 @@ export async function sendFollowUpCampaignEmail({
   }
 
   const senderEmail = authenticatedUser.email;
-  const attachmentName = (resumeKey ?? '').split('/').pop() || 'resume.pdf';
+  const attachmentName = 'resume.pdf';
   const logContext = getSendContextLogFields({ campaignId: campaign.id, companyId: campaign.company_id, recipientEmail: recipientEmail, followUp: true });
   const followUpSubject = buildFollowUpSubject({ originalSubject: subject, followUpNumber: eligibility.followUpNumber });
   const followUpBody = buildFollowUpBody({ originalBody: body, followUpNumber: eligibility.followUpNumber });

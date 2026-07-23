@@ -102,18 +102,18 @@ export async function fetchCompanies(accessToken?: string | null): Promise<Compa
 
 export async function blacklistCompany(companyId: number, companyName: string, accessToken?: string | null): Promise<void> {
   try {
-    const authenticatedUser = await getAuthenticatedUserContext(undefined, undefined, accessToken);
+    await getAuthenticatedUserContext(undefined, undefined, accessToken);
 
-    const ownership = await query<{ id: number }>(
+    const existing = await query<{ id: number }>(
       `SELECT id
-       FROM outreach_campaigns
-       WHERE user_id = $1 AND company_id = $2
+       FROM companies
+       WHERE id = $1
        LIMIT 1`,
-      [authenticatedUser.id, companyId]
+      [companyId]
     );
 
-    if (!ownership.rows[0]?.id) {
-      throw new Error('The selected company is not available for your account.');
+    if (!existing.rows[0]?.id) {
+      throw new Error('The selected company could not be found.');
     }
 
     await query(

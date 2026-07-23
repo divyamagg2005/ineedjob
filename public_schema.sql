@@ -47,6 +47,8 @@ BEGIN
 
   UPDATE incoming_emails SET company_id = NULL WHERE company_id = p_company_id;
 
+  DELETE FROM outreach_campaigns WHERE company_id = p_company_id;
+
   DELETE FROM companies WHERE id = p_company_id;
 END;
 $$;
